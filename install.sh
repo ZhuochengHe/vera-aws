@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
+uv sync
+source .venv/bin/activate
+
 ENDPOINT="${VERA_ENDPOINT:-http://localhost:5003}"
 OS="$(uname -s)"
 
@@ -70,7 +73,7 @@ else
 fi
 
 # --- Wrapper scripts ---
-BIN_DIR="$(pwd)/.bin"
+BIN_DIR="$(pwd)/.venv/bin"
 mkdir -p "$BIN_DIR"
 
 cat > "$BIN_DIR/awscli" << EOF
@@ -108,3 +111,5 @@ chmod +x "$BIN_DIR/terlocal"
 echo ""
 echo "==> Done! Add to PATH:"
 echo "    export PATH=\"$BIN_DIR:\$PATH\""
+
+source .venv/bin/activate

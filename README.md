@@ -5,13 +5,7 @@ Local AWS EC2 emulator. 89 resource types — VPCs, instances, security groups, 
 ## Setup
 
 ```bash
-git clone <repo-url> && cd vera-aws
-
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-
 ./install.sh
-export PATH="$(pwd)/.bin:$PATH"
 ```
 
 This creates a venv, installs dependencies, sets up dummy AWS credentials (`~/.aws/credentials`), and generates two wrapper scripts in `.bin/`:
@@ -26,18 +20,17 @@ This creates a venv, installs dependencies, sets up dummy AWS credentials (`~/.a
 
 ## Usage
 
-Start the emulator (activate the venv first if not already):
+Start the emulator on one terminal:
 
 ```bash
-source .venv/bin/activate
-python3 main.py
+uv run main.py
 # Running at http://localhost:5003
 ```
 
-### AWS CLI
+### AWS CLI via `uv run awscli`
 
 ```bash
-awscli ec2 create-vpc --cidr-block 10.0.0.0/16
+uv run awscli ec2 create-vpc --cidr-block 10.0.0.0/16
 # {
 #     "Vpc": {
 #         "VpcId": "vpc-28bc3a23",
@@ -46,6 +39,13 @@ awscli ec2 create-vpc --cidr-block 10.0.0.0/16
 #         ...
 #     }
 # }
+```
+
+### AWS CLI directly via `awscli`
+
+Simply activate the venv and run `awscli`:
+```bash
+source .venv/bin/activate
 
 awscli ec2 describe-vpcs
 awscli ec2 run-instances --image-id ami-12345678 --instance-type t2.micro
@@ -66,9 +66,11 @@ resource "aws_vpc" "main" {
 }
 ```
 
-Then use `terlocal` instead of `terraform`:
+Then use `uv run terlocal` instead of `terraform`. Or simply activate the venv and directly run `terlocal`:
 
 ```bash
+source .venv/bin/activate
+
 terlocal init
 terlocal apply -auto-approve
 terlocal destroy -auto-approve
@@ -80,17 +82,17 @@ See `tests/tf/` for more examples.
 
 ```bash
 # Terminal 1 — start the emulator
-python3 main.py
+uv run main.py
 
 # Terminal 2 — run 260 CLI commands against it
 cd tests
-python3 eval_emulator.py test.sh --endpoint http://localhost:5003 \
+uv run eval_emulator.py test.sh --endpoint http://localhost:5003 \
   --checkpoint eval_results.json --start-from 0
-python3 analyze_results.py eval_results.json
+uv run analyze_results.py eval_results.json
 
 # Terraform smoke test
 cd tests/tf/00-simple-vpc
-terlocal init && terlocal apply -auto-approve
+uv run terlocal init && uv run terlocal apply -auto-approve
 ```
 
 | Emulator | Passing (260 commands) |
