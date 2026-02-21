@@ -124,7 +124,7 @@ wheels = [
 
 [[package]]
 name = "vera-aws"
-version = "0.1.0"
+version = "1"
 source = { virtual = "." }
 dependencies = [
     { name = "flask" },

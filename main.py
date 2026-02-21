@@ -1,10 +1,13 @@
-import importlib
 import os
+import sys
+import uuid
+import html
+import importlib
+import inspect
+import traceback
 import logging
-from flask import Flask, request, jsonify
-from emulator_core.state import EmulatorState
-from emulator_core.backend import BaseBackend
-from emulator_core.gateway.base import BaseGateway
+from typing import Dict, Any, Tuple
+from flask import Flask, request, Response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -12,231 +15,224 @@ logger = logging.getLogger("EC2Emulator")
 
 app = Flask(__name__)
 
-# Initialize Singleton State
-state = EmulatorState()
+# Registry: Action -> (BackendInstance, ParserClass, SerializerClass)
+ACTION_REGISTRY: Dict[str, Tuple[Any, Any, Any]] = {}
 
-# Registry of Gateways
-gateways = {}
+# Populated by load_resources()
+_serialize_error_response = None
 
-def load_services():
-    """Dynamically load all service modules from emulator_core/services/"""
-    services_dir = "emulator_core/services"
-    
-    # Auto-populate state attributes from service module names
-    # This ensures that if we load 'elastic_ip_addresses.py', we have state.elastic_ip_addresses
-    for filename in os.listdir(services_dir):
-        if filename.endswith(".py") and filename != "__init__.py":
-            module_name = filename[:-3]
-            if not hasattr(state, module_name):
-                setattr(state, module_name, {})
+def esc(s):
+    return html.escape(str(s), quote=True)
 
-    # Ensure critical legacy/specific attributes exist if they don't match module names exactly
-    # (Though most should match now if we stick to snake_case module names matching state attributes)
-    extra_attrs = ["vpcs", "subnets", "instances", "security_groups", "resources"]
-    for attr in extra_attrs:
-        if not hasattr(state, attr):
-            setattr(state, attr, {})
+def error_xml(code, message, req_id):
+    return (
+        f"<Response><Errors>"
+        f"<Error><Code>{esc(code)}</Code><Message>{esc(message)}</Message></Error>"
+        f"</Errors><RequestID>{esc(req_id)}</RequestID></Response>"
+    )
+
+def load_resources(code_dir: str):
+    """Load all resource modules from the generated code directory and register actions."""
+    if not os.path.exists(code_dir):
+        logger.error(f"Generated code directory '{code_dir}' not found.")
+        return
+
+    abs_path = os.path.abspath(code_dir)
+    parent_dir = os.path.dirname(abs_path)
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+
+    package_name = os.path.basename(abs_path)
+    logger.info(f"Loading resources from package: {package_name}")
+
+    try:
+        module = importlib.import_module(package_name)
+    except Exception as e:
+        logger.error(f"Failed to import package {package_name}: {e}")
+        traceback.print_exc()
+        return
+
+    # Load serialize_error_response from utils
+    global _serialize_error_response
+    try:
+        utils_mod = importlib.import_module(f"{package_name}.utils")
+        _serialize_error_response = utils_mod.serialize_error_response
+    except Exception as e:
+        logger.warning(f"Could not load serialize_error_response from {package_name}.utils: {e}")
 
     # Populate default regions if empty
-    if not hasattr(state, "regions_and_zones") or not state.regions_and_zones:
-        try:
-            from emulator_core.services.regions_and_zones import Region, OptInStatus, AvailabilityZone, ZoneState, ZoneType
-            
-            # Default Regions
+    try:
+        state_mod = importlib.import_module(f"{package_name}.services.regionandzone")
+        RegionAndZone = state_mod.RegionAndZone
+        state_mod2 = importlib.import_module(f"{package_name}.state")
+        state = state_mod2.EC2State.get()
+
+        if not state.regions_and_zones:
             default_regions = ["us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1", "eu-central-1"]
             for region_name in default_regions:
-                region = Region(
+                state.regions_and_zones[region_name] = RegionAndZone(
                     region_name=region_name,
                     region_endpoint=f"ec2.{region_name}.amazonaws.com",
-                    opt_in_status=OptInStatus.OPT_IN_NOT_REQUIRED
+                    opt_in_status="opt-in-not-required"
                 )
-                state.regions_and_zones[region_name] = region
-                
-                # Default AZs for us-east-1
                 if region_name == "us-east-1":
                     for zone_suffix in ["a", "b", "c", "d", "e", "f"]:
                         zone_name = f"{region_name}{zone_suffix}"
                         zone_id = f"use1-az{ord(zone_suffix) - ord('a') + 1}"
-                        az = AvailabilityZone(
+                        state.regions_and_zones[zone_name] = RegionAndZone(
                             zone_name=zone_name,
                             zone_id=zone_id,
                             region_name=region_name,
-                            zone_state=ZoneState.AVAILABLE,
-                            opt_in_status=OptInStatus.OPT_IN_NOT_REQUIRED,
-                            zone_type=ZoneType.AVAILABILITY_ZONE,
+                            zone_state="available",
+                            opt_in_status="opt-in-not-required",
+                            zone_type="availability-zone",
                             group_name=region_name,
                             network_border_group=region_name
                         )
-                        state.regions_and_zones[zone_name] = az
-                        
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.error(f"Failed to populate default regions: {e}")
+    except Exception as e:
+        logger.error(f"Failed to populate default regions: {e}")
 
-    for filename in os.listdir(services_dir):
-        if filename.endswith(".py") and filename != "__init__.py":
-            module_name = filename[:-3]
-            try:
-                module = importlib.import_module(f"emulator_core.services.{module_name}")
-                
-                # Find Backend and Gateway classes
-                backend_cls = None
-                gateway_cls = None
-                
-                for attr_name in dir(module):
-                    if attr_name.endswith("Backend") and attr_name != "BaseBackend":
-                        backend_cls = getattr(module, attr_name)
-                    if attr_name.endswith("Gateway") and attr_name != "BaseGateway":
-                        cls = getattr(module, attr_name)
-                        if isinstance(cls, type) and issubclass(cls, BaseGateway):
-                            gateway_cls = cls
-                        
-                if backend_cls and gateway_cls:
-                    # Instantiate
-                    backend = backend_cls(state)
-                    gateway = gateway_cls(backend)
-                    
-                    # Register actions
-                    for action in gateway.actions.keys():
-                        gateways[action] = gateway
-                        
-                    logger.info(f"Loaded service: {module_name} ({len(gateway.actions)} actions)")
-                    
-            except Exception as e:
-                logger.error(f"Failed to load service {module_name}: {e}")
-
-@app.route("/", methods=["POST", "GET"])
-def handle_request():
-    # Parse AWS Query Parameters (Action, Version, etc.)
-    if request.method == "POST":
-        params = request.form.to_dict()
-    else:
-        params = request.args.to_dict()
-        
-    action = params.get("Action")
-    if not action:
-        return jsonify({"Error": "Missing Action parameter"}), 400
-        
-    gateway = gateways.get(action)
-    if not gateway:
-        return jsonify({"Error": f"Unknown Action: {action}"}), 400
-        
+    # Seed common instance types so RunInstances can validate InstanceType
     try:
-        # Pass all params to the handler
-        response = gateway.dispatch(action, params)
-        
-        # XML Conversion Logic
-        request_id = response.get("requestId", f"req-{os.urandom(8).hex()}")
-        # Remove requestId from response dict if present, as it goes into header or root
-        if "requestId" in response:
-            del response["requestId"]
-            
-        def dict_to_xml(tag, d):
-            parts = [f"<{tag}>"]
-            if isinstance(d, dict):
-                for key, val in d.items():
-                    # EC2 conventions: 
-                    # Keys starting with lowercase are usually converted to TitleCase in XML?
-                    # Actually, our backend returns mixed keys.
-                    # Standard EC2 responses use UpperCamelCase for tags.
-                    # We will capitalize the first letter of keys if they are lowercase.
-                    
-                    # Heuristic: capitalize first letter if it looks like a field name
-                    xml_key = key
+        it_mod = importlib.import_module(f"{package_name}.services.instancetype")
+        InstanceType = it_mod.InstanceType
+        state_mod2 = importlib.import_module(f"{package_name}.state")
+        state = state_mod2.EC2State.get()
 
-                    if isinstance(val, list):
-                        # List handling: 
-                        # Usually <SetName><item>...</item><item>...</item></SetName>
-                        # OR flattened list?
-                        # EC2 usually wraps list items in <item>
-                        parts.append(f"<{xml_key}>")
-                        for item in val:
-                            parts.append(dict_to_xml("item", item))
-                        parts.append(f"</{xml_key}>")
-                    else:
-                        parts.append(dict_to_xml(xml_key, val))
-            elif isinstance(d, list):
-                # Should not happen if called correctly from dict loop, but handle just in case
-                for item in d:
-                    parts.append(dict_to_xml("item", item))
-            elif d is None:
-                # Empty tag or omit? Omit usually.
-                pass
+        if not state.instance_types:
+            _INSTANCE_TYPES = [
+                # General purpose
+                "t2.nano","t2.micro","t2.small","t2.medium","t2.large","t2.xlarge","t2.2xlarge",
+                "t3.nano","t3.micro","t3.small","t3.medium","t3.large","t3.xlarge","t3.2xlarge",
+                "t3a.nano","t3a.micro","t3a.small","t3a.medium","t3a.large","t3a.xlarge","t3a.2xlarge",
+                "t4g.nano","t4g.micro","t4g.small","t4g.medium","t4g.large","t4g.xlarge","t4g.2xlarge",
+                "m5.large","m5.xlarge","m5.2xlarge","m5.4xlarge","m5.8xlarge","m5.12xlarge","m5.16xlarge","m5.24xlarge","m5.metal",
+                "m5a.large","m5a.xlarge","m5a.2xlarge","m5a.4xlarge","m5a.8xlarge","m5a.12xlarge","m5a.16xlarge","m5a.24xlarge",
+                "m6i.large","m6i.xlarge","m6i.2xlarge","m6i.4xlarge","m6i.8xlarge","m6i.12xlarge","m6i.16xlarge","m6i.24xlarge","m6i.32xlarge","m6i.metal",
+                "m6a.large","m6a.xlarge","m6a.2xlarge","m6a.4xlarge","m6a.8xlarge","m6a.12xlarge","m6a.16xlarge","m6a.24xlarge","m6a.32xlarge","m6a.48xlarge","m6a.metal",
+                "m7i.large","m7i.xlarge","m7i.2xlarge","m7i.4xlarge","m7i.8xlarge","m7i.12xlarge","m7i.16xlarge","m7i.24xlarge","m7i.48xlarge","m7i.metal-24xl","m7i.metal-48xl",
+                # Compute optimized
+                "c5.large","c5.xlarge","c5.2xlarge","c5.4xlarge","c5.9xlarge","c5.12xlarge","c5.18xlarge","c5.24xlarge","c5.metal",
+                "c5a.large","c5a.xlarge","c5a.2xlarge","c5a.4xlarge","c5a.8xlarge","c5a.12xlarge","c5a.16xlarge","c5a.24xlarge",
+                "c6i.large","c6i.xlarge","c6i.2xlarge","c6i.4xlarge","c6i.8xlarge","c6i.12xlarge","c6i.16xlarge","c6i.24xlarge","c6i.32xlarge","c6i.metal",
+                "c7i.large","c7i.xlarge","c7i.2xlarge","c7i.4xlarge","c7i.8xlarge","c7i.12xlarge","c7i.16xlarge","c7i.24xlarge","c7i.48xlarge","c7i.metal-24xl","c7i.metal-48xl",
+                # Memory optimized
+                "r5.large","r5.xlarge","r5.2xlarge","r5.4xlarge","r5.8xlarge","r5.12xlarge","r5.16xlarge","r5.24xlarge","r5.metal",
+                "r6i.large","r6i.xlarge","r6i.2xlarge","r6i.4xlarge","r6i.8xlarge","r6i.12xlarge","r6i.16xlarge","r6i.24xlarge","r6i.32xlarge","r6i.metal",
+                "x2idn.16xlarge","x2idn.24xlarge","x2idn.32xlarge","x2idn.metal",
+                # Storage optimized
+                "i3.large","i3.xlarge","i3.2xlarge","i3.4xlarge","i3.8xlarge","i3.16xlarge","i3.metal",
+                "i3en.large","i3en.xlarge","i3en.2xlarge","i3en.3xlarge","i3en.6xlarge","i3en.12xlarge","i3en.24xlarge","i3en.metal",
+                # Accelerated (GPU)
+                "p2.xlarge","p2.8xlarge","p2.16xlarge",
+                "p3.2xlarge","p3.8xlarge","p3.16xlarge",
+                "p3dn.24xlarge",
+                "p4d.24xlarge",
+                "p5.48xlarge",
+                "g4dn.xlarge","g4dn.2xlarge","g4dn.4xlarge","g4dn.8xlarge","g4dn.12xlarge","g4dn.16xlarge","g4dn.metal",
+                "g5.xlarge","g5.2xlarge","g5.4xlarge","g5.8xlarge","g5.12xlarge","g5.16xlarge","g5.24xlarge","g5.48xlarge",
+                "g6.xlarge","g6.2xlarge","g6.4xlarge","g6.8xlarge","g6.12xlarge","g6.16xlarge","g6.24xlarge","g6.48xlarge",
+                "inf1.xlarge","inf1.2xlarge","inf1.6xlarge","inf1.24xlarge",
+                "inf2.xlarge","inf2.8xlarge","inf2.24xlarge","inf2.48xlarge",
+                "trn1.2xlarge","trn1.32xlarge","trn1n.32xlarge",
+            ]
+            for it_name in _INSTANCE_TYPES:
+                state.instance_types[it_name] = InstanceType(instance_type=it_name, current_generation=True)
+            logger.info(f"Seeded {len(_INSTANCE_TYPES)} instance types")
+    except Exception as e:
+        logger.error(f"Failed to seed instance types: {e}")
+
+    # Group exported classes by resource name
+    resources = {}
+    for name, obj in inspect.getmembers(module):
+        if inspect.isclass(obj):
+            if name.endswith("_Backend"):
+                res_name = name[:-8].lower()
+                resources.setdefault(res_name, {})["backend"] = obj
+            elif name.endswith("_RequestParser"):
+                res_name = name[:-14].lower()
+                resources.setdefault(res_name, {})["parser"] = obj
+            elif name.endswith("_ResponseSerializer"):
+                res_name = name[:-19].lower()
+                resources.setdefault(res_name, {})["serializer"] = obj
+
+    # Register actions
+    for res_name, components in resources.items():
+        backend_cls = components.get("backend")
+        parser_cls = components.get("parser")
+        serializer_cls = components.get("serializer")
+
+        if not (backend_cls and parser_cls and serializer_cls):
+            logger.warning(f"Skipping {res_name}: missing B:{bool(backend_cls)} P:{bool(parser_cls)} S:{bool(serializer_cls)}")
+            continue
+
+        try:
+            backend_instance = backend_cls()
+        except Exception as e:
+            logger.error(f"Failed to instantiate backend for {res_name}: {e}")
+            continue
+
+        methods = inspect.getmembers(backend_instance, predicate=inspect.ismethod)
+        count = 0
+        for method_name, _ in methods:
+            if not method_name.startswith("_"):
+                ACTION_REGISTRY[method_name] = (backend_instance, parser_cls, serializer_cls)
+                count += 1
+
+        logger.info(f"Loaded service: {res_name} ({count} actions)")
+
+    logger.info(f"Total actions registered: {len(ACTION_REGISTRY)}")
+
+@app.route("/", methods=["GET", "POST"])
+def handle_request():
+    req_id = str(uuid.uuid4())
+
+    action = request.values.get("Action")
+    if not action:
+        return Response(error_xml("MissingParameter", "The parameter Action is missing", req_id), status=400, mimetype="text/xml")
+
+    handler = ACTION_REGISTRY.get(action)
+    if not handler:
+        logger.warning(f"Unknown action: {action}")
+        return Response(error_xml("InvalidAction", f"The action {action} is not valid for this endpoint", req_id), status=400, mimetype="text/xml")
+
+    backend, parser, serializer = handler
+
+    try:
+        params = parser.parse_request(action, request.values)
+        logger.info(f"[{action}] Params: {params}")
+
+        method = getattr(backend, action)
+        result = method(params)
+
+        # Normalize nextToken: None -> ""
+        if isinstance(result, dict) and result.get("nextToken") is None:
+            result["nextToken"] = ""
+
+        logger.info(f"[{action}] Result: {result}")
+
+        # Check if backend returned an error response
+        if isinstance(result, dict) and "Error" in result:
+            if _serialize_error_response is not None:
+                xml_error = _serialize_error_response(result, req_id)
             else:
-                parts.append(str(d))
-            
-            # Close tag only if we opened it (which we did at start)
-            # But wait, for leaf nodes (str), we don't want nested <tag>val</tag> inside the recursion?
-            # Re-structure:
-            # Recursive function should return XML string content.
-            # But the tag wrapping is cleaner.
-            
-            # Let's use a simpler recursive approach
-            return "".join(parts) + f"</{tag}>"
+                err = result["Error"]
+                xml_error = error_xml(err.get("Code", "InternalError"), err.get("Message", ""), req_id)
+            return Response(xml_error, status=400, mimetype="text/xml")
 
-        def to_xml_recursive(key, value):
-            xml_key = key
+        xml_response = serializer.serialize(action, result, req_id)
+        logger.info(f"[{action}] XML: {xml_response}")
 
-            if value is None:
-                return ""
-            
-            if isinstance(value, list):
-                # EC2 list convention: <Key><item>...</item>...</Key>
-                items_xml = ""
-                for item in value:
-                    if isinstance(item, dict) or isinstance(item, list):
-                        items_xml += f"<item>{''.join(to_xml_recursive(k, v) for k, v in item.items()) if isinstance(item, dict) else to_xml_recursive('item', item)}</item>"
-                    else:
-                        items_xml += f"<item>{str(item)}</item>"
-                return f"<{xml_key}>{items_xml}</{xml_key}>"
-            
-            elif isinstance(value, dict):
-                content = "".join(to_xml_recursive(k, v) for k, v in value.items())
-                return f"<{xml_key}>{content}</{xml_key}>"
-            
-            elif isinstance(value, bool):
-                return f"<{xml_key}>{'true' if value else 'false'}</{xml_key}>"
-
-            else:
-                return f"<{xml_key}>{str(value)}</{xml_key}>"
-
-        # Construct Root Response
-        root_content = "".join(to_xml_recursive(k, v) for k, v in response.items())
-        xml_body = f"""<?xml version="1.0" encoding="UTF-8"?>
-<{action}Response xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
-    <requestId>{request_id}</requestId>
-{root_content}
-</{action}Response>"""
-
-        return xml_body, 200, {'Content-Type': 'application/xml'}
+        return Response(xml_response, mimetype="text/xml")
 
     except Exception as e:
         logger.error(f"Error handling {action}: {e}")
-        # Return XML error response to mimic EC2 behavior
-        error_code = "InternalError"
-        error_message = str(e)
-        if hasattr(e, "code"): # Assuming ErrorCode exception
-             error_code = e.code
-        elif ":" in str(e): # Try to parse "Code: Message" format
-             parts = str(e).split(":", 1)
-             if len(parts) == 2 and " " not in parts[0]:
-                 error_code = parts[0]
-                 error_message = parts[1].strip()
-
-        xml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Errors>
-        <Error>
-            <Code>{error_code}</Code>
-            <Message>{error_message}</Message>
-        </Error>
-    </Errors>
-    <RequestID>req-{os.urandom(4).hex()}</RequestID>
-</Response>"""
-        return xml_response, 400, {'Content-Type': 'application/xml'}
+        traceback.print_exc()
+        msg = str(e)
+        code = msg if (" " not in msg and len(msg) < 50) else "InternalFailure"
+        return Response(error_xml(code, msg, req_id), status=400, mimetype="text/xml")
 
 if __name__ == "__main__":
     logger.info("Starting EC2 Emulator...")
-    load_services()
+    load_resources("emulator_core")
     app.run(port=5003, debug=True)

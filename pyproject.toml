@@ -1,6 +1,6 @@
 [project]
 name = "vera-aws"
-version = "0.1.0"
+version = "1"
 description = "A local AWS EC2 service emulator for development and testing"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -1,668 +1,785 @@
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from dataclasses import dataclass, field, asdict
 from enum import Enum
-from emulator_core.backend import BaseBackend
+import uuid
+import re
+from ..utils import (get_scalar, get_int, get_indexed_list, parse_filters, apply_filters,
+                    parse_tags, str2bool, esc, create_error_response,
+                    is_error_response, serialize_error_response)
+from ..state import EC2State
 
+class ResourceState(Enum):
+    PENDING = 'pending'
+    AVAILABLE = 'available'
+    RUNNING = 'running'
+    STOPPED = 'stopped'
+    TERMINATED = 'terminated'
+    DELETING = 'deleting'
+    DELETED = 'deleted'
+    NONEXISTENT = 'non-existent'
+    FAILED = 'failed'
+    SHUTTING_DOWN = 'shutting-down'
+    STOPPING = 'stopping'
+    STARTING = 'starting'
+    REBOOTING = 'rebooting'
+    ATTACHED = 'attached'
+    IN_USE = 'in-use'
+    CREATING = 'creating'
 
-class AsnAssociationState(str, Enum):
-    DISASSOCIATED = "disassociated"
-    FAILED_DISASSOCIATION = "failed-disassociation"
-    FAILED_ASSOCIATION = "failed-association"
-    PENDING_DISASSOCIATION = "pending-disassociation"
-    PENDING_ASSOCIATION = "pending-association"
-    ASSOCIATED = "associated"
-
+class ErrorCode(Enum):
+    INVALID_PARAMETER_VALUE = 'InvalidParameterValue'
+    RESOURCE_NOT_FOUND = 'ResourceNotFound'
+    INVALID_STATE_TRANSITION = 'InvalidStateTransition'
+    DEPENDENCY_VIOLATION = 'DependencyViolation'
 
 @dataclass
-class AsnAssociation:
-    asn: Optional[str] = None
-    cidr: Optional[str] = None
-    state: Optional[AsnAssociationState] = None
-    statusMessage: Optional[str] = None
+class BYOASN:
+    asn: str = ""
+    ipam_id: str = ""
+    state: str = ""
+    status_message: str = ""
+
+    resource_type: str = "byoasn"
+    cidr_associations: List[str] = field(default_factory=list)
+    asn_authorization_context: Dict[str, Any] = field(default_factory=dict)
+    token_id: str = ""
+    token_value: str = ""
+    token_name: str = ""
+    token_arn: str = ""
+    ipam_arn: str = ""
+    ipam_region: str = ""
+    not_after: Optional[str] = None
+    token_status: str = ""
+    tag_set: List[Dict[str, str]] = field(default_factory=list)
+
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "asn": self.asn,
-            "cidr": self.cidr,
-            "state": self.state.value if self.state else None,
-            "statusMessage": self.statusMessage,
+            "ipamId": self.ipam_id,
+            "state": self.state,
+            "statusMessage": self.status_message,
+            "cidrAssociations": self.cidr_associations,
+            "asnAuthorizationContext": self.asn_authorization_context,
+            "tokenId": self.token_id,
+            "tokenValue": self.token_value,
+            "tokenName": self.token_name,
+            "tokenArn": self.token_arn,
+            "ipamArn": self.ipam_arn,
+            "ipamRegion": self.ipam_region,
+            "notAfter": self.not_after,
+            "tokenStatus": self.token_status,
+            "tagSet": self.tag_set,
         }
 
+class BYOASN_Backend:
+    def __init__(self):
+        self.state = EC2State.get()
+        self.resources = self.state.byoasn  # alias to shared store
 
-class IpamExternalResourceVerificationTokenState(str, Enum):
-    CREATE_IN_PROGRESS = "create-in-progress"
-    CREATE_COMPLETE = "create-complete"
-    CREATE_FAILED = "create-failed"
-    DELETE_IN_PROGRESS = "delete-in-progress"
-    DELETE_COMPLETE = "delete-complete"
-    DELETE_FAILED = "delete-failed"
+    def _find_byoasn(self, asn: str, ipam_id: Optional[str] = None) -> Optional[BYOASN]:
+        for resource in self.resources.values():
+            if resource.resource_type != "byoasn":
+                continue
+            if resource.asn != asn:
+                continue
+            if ipam_id and resource.ipam_id != ipam_id:
+                continue
+            return resource
+        return None
 
+    def _find_verification_token(self, token_id: str) -> Optional[BYOASN]:
+        for resource in self.resources.values():
+            if resource.resource_type != "verification-token":
+                continue
+            if resource.token_id == token_id:
+                return resource
+        return None
 
-class IpamExternalResourceVerificationTokenStatus(str, Enum):
-    VALID = "valid"
-    EXPIRED = "expired"
-
-
-@dataclass
-class Tag:
-    Key: Optional[str] = None
-    Value: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "Key": self.Key,
-            "Value": self.Value,
-        }
-
-
-@dataclass
-class TagSpecification:
-    ResourceType: Optional[str] = None
-    Tags: List[Tag] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "ResourceType": self.ResourceType,
-            "Tags": [tag.to_dict() for tag in self.Tags],
-        }
+    def _list_verification_tokens(self) -> List[BYOASN]:
+        return [resource for resource in self.resources.values() if resource.resource_type == "verification-token"]
 
 
-@dataclass
-class IpamExternalResourceVerificationToken:
-    ipamArn: Optional[str] = None
-    ipamExternalResourceVerificationTokenArn: Optional[str] = None
-    ipamExternalResourceVerificationTokenId: Optional[str] = None
-    ipamId: Optional[str] = None
-    ipamRegion: Optional[str] = None
-    notAfter: Optional[datetime] = None
-    state: Optional[IpamExternalResourceVerificationTokenState] = None
-    status: Optional[IpamExternalResourceVerificationTokenStatus] = None
-    tagSet: List[Tag] = field(default_factory=list)
-    tokenName: Optional[str] = None
-    tokenValue: Optional[str] = None
+    def AssociateIpamByoasn(self, params: Dict[str, Any]):
+        """Associates your Autonomous System Number (ASN) with a BYOIP CIDR that you own in the same AWS Region. 
+            For more information, seeTutorial: Bring your ASN to IPAMin theAmazon VPC IPAM guide. After the association succeeds, the ASN is eligible for 
+            advertisement. You can view th"""
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "ipamArn": self.ipamArn,
-            "ipamExternalResourceVerificationTokenArn": self.ipamExternalResourceVerificationTokenArn,
-            "ipamExternalResourceVerificationTokenId": self.ipamExternalResourceVerificationTokenId,
-            "ipamId": self.ipamId,
-            "ipamRegion": self.ipamRegion,
-            "notAfter": self.notAfter.isoformat() if self.notAfter else None,
-            "state": self.state.value if self.state else None,
-            "status": self.status.value if self.status else None,
-            "tagSet": [tag.to_dict() for tag in self.tagSet],
-            "tokenName": self.tokenName,
-            "tokenValue": self.tokenValue,
-        }
-
-
-class ByoasnState(str, Enum):
-    DEPROVISIONED = "deprovisioned"
-    FAILED_DEPROVISION = "failed-deprovision"
-    FAILED_PROVISION = "failed-provision"
-    PENDING_DEPROVISION = "pending-deprovision"
-    PENDING_PROVISION = "pending-provision"
-    PROVISIONED = "provisioned"
-
-
-@dataclass
-class Byoasn:
-    asn: Optional[str] = None
-    ipamId: Optional[str] = None
-    state: Optional[ByoasnState] = None
-    statusMessage: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "asn": self.asn,
-            "ipamId": self.ipamId,
-            "state": self.state.value if self.state else None,
-            "statusMessage": self.statusMessage,
-        }
-
-
-@dataclass
-class AsnAuthorizationContext:
-    Message: str
-    Signature: str
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "Message": self.Message,
-            "Signature": self.Signature,
-        }
-
-
-@dataclass
-class Filter:
-    Name: Optional[str] = None
-    Values: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "Name": self.Name,
-            "Values": self.Values,
-        }
-
-
-class BYOASNBackend(BaseBackend):
-    def __init__(self, state):
-        super().__init__(state)
-
-    def associate_ipam_byoasn(self, params: Dict[str, Any]) -> Dict[str, Any]:
         asn = params.get("Asn")
+        if not asn:
+            return create_error_response("MissingParameter", "Missing required parameter: Asn")
         cidr = params.get("Cidr")
-        dry_run = params.get("DryRun", False)
-
-        if dry_run:
-            # For simplicity, assume permission granted
-            return {"Error": {"Code": "DryRunOperation", "Message": "Request would have succeeded, but DryRun flag is set."}}
-
-        if not asn:
-            raise ValueError("Asn is required")
         if not cidr:
-            raise ValueError("Cidr is required")
+            return create_error_response("MissingParameter", "Missing required parameter: Cidr")
 
-        # Find existing association by asn and cidr
-        for assoc in self.state.byoasn.values():
-            if assoc.asn == asn and assoc.state is not None:
-                # If already associated with this cidr, return existing association
-                if assoc.state.name == "associated" and assoc.ipamId is not None:
-                    return {
-                        "asnAssociation": {
-                            "asn": assoc.asn,
-                            "cidr": cidr,
-                            "state": assoc.state.name,
-                            "statusMessage": assoc.statusMessage,
-                        },
-                        "requestId": self.generate_request_id(),
-                    }
+        resource = self._find_byoasn(asn)
+        if not resource:
+            return create_error_response("InvalidAsn.NotFound", f"The ASN '{asn}' does not exist")
 
-        # Create new association
-        # Use asn+cidr as key for uniqueness
-        assoc_id = f"{asn}:{cidr}"
-        from enum import Enum
-
-        # Define states enum for AsnAssociationState if not defined
-        # But per instructions, use Enum members, assume AsnAssociationState has members
-        # We'll simulate with strings here as placeholder
-        # But per instructions, use Enum members, so assume AsnAssociationState.ASSOCIATED etc.
-
-        # For this implementation, assume AsnAssociationState has members:
-        # ASSOCIATED, DISASSOCIATED, FAILED_ASSOCIATION, FAILED_DISASSOCIATION, PENDING_ASSOCIATION, PENDING_DISASSOCIATION
-
-        # We'll create a new AsnAssociation object
-        # But the class AsnAssociation has asn, cidr, state, statusMessage
-
-        # For state, assign AsnAssociationState.ASSOCIATED
-        # For statusMessage, assign None or "Association successful"
-
-        # Since we don't have actual Enum members, we will assign string "associated" per the doc
-        # But instructions say to use Enum members, so assume AsnAssociationState.ASSOCIATED
-
-        # We'll check if AsnAssociationState has ASSOCIATED member
-        # If not, fallback to string "associated"
-
-        try:
-            state_enum = AsnAssociationState.ASSOCIATED
-        except Exception:
-            state_enum = "associated"
-
-        association = AsnAssociation()
-        association.asn = asn
-        association.cidr = cidr
-        association.state = state_enum
-        association.statusMessage = "Association successful"
-
-        self.state.byoasn[assoc_id] = association
+        if cidr not in resource.cidr_associations:
+            resource.cidr_associations.append(cidr)
 
         return {
-            "asnAssociation": {
-                "asn": association.asn,
-                "cidr": association.cidr,
-                "state": association.state.name if hasattr(association.state, "name") else association.state,
-                "statusMessage": association.statusMessage,
-            },
-            "requestId": self.generate_request_id(),
-        }
+            'asnAssociation': {
+                'asn': asn,
+                'cidr': cidr,
+                'state': "associated",
+                'statusMessage': resource.status_message,
+                },
+            }
 
+    def CreateIpamExternalResourceVerificationToken(self, params: Dict[str, Any]):
+        """Create a verification token. A verification token is an AWS-generated random value that you can use to prove ownership of an external resource. For example, you can use a verification token to validate that you control a public IP address range when you bring an IP address range to AWS (BYOIP)."""
 
-    def create_ipam_external_resource_verification_token(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        client_token = params.get("ClientToken")
-        dry_run = params.get("DryRun", False)
         ipam_id = params.get("IpamId")
-        tag_specifications = params.get("TagSpecification.N", [])
-
-        if dry_run:
-            return {"Error": {"Code": "DryRunOperation", "Message": "Request would have succeeded, but DryRun flag is set."}}
-
         if not ipam_id:
-            raise ValueError("IpamId is required")
+            return create_error_response("MissingParameter", "Missing required parameter: IpamId")
 
-        # Generate unique token id and arn
-        token_id = self.generate_unique_id()
-        token_arn = f"arn:aws:ec2:{self.state.region}:{self.get_owner_id()}:ipam-external-resource-verification-token/{token_id}"
-        ipam_arn = f"arn:aws:ec2:{self.state.region}:{self.get_owner_id()}:ipam/{ipam_id}"
-        ipam_region = self.state.region
+        ipam = self.state.ipams.get(ipam_id)
+        if not ipam:
+            return create_error_response("InvalidIpamId.NotFound", f"IPAM '{ipam_id}' does not exist.")
 
-        from datetime import datetime, timedelta
-        not_after = datetime.utcnow() + timedelta(days=7)  # Token valid for 7 days
+        tag_set = []
+        for spec in params.get("TagSpecification.N", []) or []:
+            for tag in spec.get("Tags", []) or []:
+                tag_set.append({"Key": tag.get("Key", ""), "Value": tag.get("Value", "")})
 
-        # State and status enums
-        try:
-            state_enum = IpamExternalResourceVerificationTokenState.CREATE_COMPLETE
-        except Exception:
-            state_enum = "create-complete"
-        try:
-            status_enum = IpamExternalResourceVerificationTokenStatus.VALID
-        except Exception:
-            status_enum = "valid"
+        token_id = self._generate_id("ipam-ert")
+        token_value = uuid.uuid4().hex
+        token_name = params.get("ClientToken") or token_id
+        not_after = datetime.now(timezone.utc).isoformat()
+        ipam_region = getattr(ipam, "region", None) or getattr(ipam, "ipam_region", None) or "us-east-1"
+        ipam_arn = getattr(ipam, "arn", None) or getattr(ipam, "ipam_arn", None) or f"arn:aws:ec2:{ipam_region}::ipam/{ipam_id}"
+        token_arn = f"arn:aws:ec2:{ipam_region}::ipam-external-resource-verification-token/{token_id}"
 
-        # Process tags from tag_specifications
-        tags = []
-        for tag_spec in tag_specifications:
-            # tag_spec is expected to be a dict with ResourceType and Tags
-            tag_list = tag_spec.get("Tags", [])
-            for tag_dict in tag_list:
-                tag = Tag()
-                tag.Key = tag_dict.get("Key")
-                tag.Value = tag_dict.get("Value")
-                tags.append(tag)
-
-        token = IpamExternalResourceVerificationToken()
-        token.ipamArn = ipam_arn
-        token.ipamExternalResourceVerificationTokenArn = token_arn
-        token.ipamExternalResourceVerificationTokenId = token_id
-        token.ipamId = ipam_id
-        token.ipamRegion = ipam_region
-        token.notAfter = not_after
-        token.state = state_enum
-        token.status = status_enum
-        token.tagSet = tags
-        token.tokenName = None
-        token.tokenValue = token_id  # For simplicity, tokenValue is token_id
-
-        self.state.resources[token_id] = token
+        resource = BYOASN(
+            asn="",
+            ipam_id=ipam_id,
+            state="available",
+            status_message="",
+            resource_type="verification-token",
+            token_id=token_id,
+            token_value=token_value,
+            token_name=token_name,
+            token_arn=token_arn,
+            ipam_arn=ipam_arn,
+            ipam_region=ipam_region,
+            not_after=not_after,
+            token_status="active",
+            tag_set=tag_set,
+        )
+        self.resources[token_id] = resource
 
         return {
-            "ipamExternalResourceVerificationToken": token.to_dict(),
-            "requestId": self.generate_request_id(),
-        }
+            'ipamExternalResourceVerificationToken': {
+                'ipamArn': resource.ipam_arn,
+                'ipamExternalResourceVerificationTokenArn': resource.token_arn,
+                'ipamExternalResourceVerificationTokenId': resource.token_id,
+                'ipamId': resource.ipam_id,
+                'ipamRegion': resource.ipam_region,
+                'notAfter': resource.not_after,
+                'state': resource.state,
+                'status': resource.token_status,
+                'tagSet': resource.tag_set,
+                'tokenName': resource.token_name,
+                'tokenValue': resource.token_value,
+                },
+            }
 
+    def DeleteIpamExternalResourceVerificationToken(self, params: Dict[str, Any]):
+        """Delete a verification token. A verification token is an AWS-generated random value that you can use to prove ownership of an external resource. For example, you can use a verification token to validate that you control a public IP address range when you bring an IP address range to AWS (BYOIP)."""
 
-    def delete_ipam_external_resource_verification_token(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        dry_run = params.get("DryRun", False)
         token_id = params.get("IpamExternalResourceVerificationTokenId")
-
-        if dry_run:
-            return {"Error": {"Code": "DryRunOperation", "Message": "Request would have succeeded, but DryRun flag is set."}}
-
         if not token_id:
-            raise ValueError("IpamExternalResourceVerificationTokenId is required")
-
-        token = self.state.resources.get(token_id)
-        if not token or not isinstance(token, IpamExternalResourceVerificationToken):
-            raise ValueError(f"Verification token with id {token_id} not found")
-
-        # Mark token as deleted
-        try:
-            token.state = IpamExternalResourceVerificationTokenState.DELETE_COMPLETE
-        except Exception:
-            token.state = "delete-complete"
-        try:
-            token.status = IpamExternalResourceVerificationTokenStatus.EXPIRED
-        except Exception:
-            token.status = "expired"
-
-        # Remove from resources
-        del self.state.resources[token_id]
-
-        return {
-            "ipamExternalResourceVerificationToken": token.to_dict(),
-            "requestId": self.generate_request_id(),
-        }
-
-
-    def deprovision_ipam_byoasn(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        asn = params.get("Asn")
-        dry_run = params.get("DryRun", False)
-        ipam_id = params.get("IpamId")
-
-        if dry_run:
-            return {"Error": {"Code": "DryRunOperation", "Message": "Request would have succeeded, but DryRun flag is set."}}
-
-        if not asn:
-            raise ValueError("Asn is required")
-        if not ipam_id:
-            raise ValueError("IpamId is required")
-
-        # Find the byoasn by asn and ipam_id
-        byoasn_obj = None
-        for byoasn in self.state.byoasn.values():
-            if byoasn.asn == asn and byoasn.ipamId == ipam_id:
-                byoasn_obj = byoasn
-                break
-
-        if not byoasn_obj:
-            # Create a new byoasn object with deprovisioned state
-            byoasn_obj = Byoasn()
-            byoasn_obj.asn = asn
-            byoasn_obj.ipamId = ipam_id
-
-        # Check if any BYOIP CIDR associations exist for this ASN
-        # We check self.state.byoasn for any associations with this asn and state associated
-        for assoc in self.state.byoasn.values():
-            if assoc.asn == asn and assoc.state is not None:
-                # If any association exists, cannot deprovision
-                raise ValueError("Cannot deprovision ASN with existing BYOIP CIDR associations. Remove associations first.")
-
-        # Set state to deprovisioned
-        try:
-            byoasn_obj.state = ByoasnState.DEPROVISIONED
-        except Exception:
-            byoasn_obj.state = "deprovisioned"
-        byoasn_obj.statusMessage = "ASN deprovisioned successfully"
-
-        # Store/update in state
-        key = f"{asn}:{ipam_id}"
-        self.state.byoasn[key] = byoasn_obj
-
-        return {
-            "byoasn": {
-                "asn": byoasn_obj.asn,
-                "ipamId": byoasn_obj.ipamId,
-                "state": byoasn_obj.state.name if hasattr(byoasn_obj.state, "name") else byoasn_obj.state,
-                "statusMessage": byoasn_obj.statusMessage,
-            },
-            "requestId": self.generate_request_id(),
-        }
-
-
-    def describe_ipam_byoasn(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        dry_run = params.get("DryRun", False)
-        max_results = params.get("MaxResults")
-        next_token = params.get("NextToken")
-
-        if dry_run:
-            return {"Error": {"Code": "DryRunOperation", "Message": "Request would have succeeded, but DryRun flag is set."}}
-
-        # Validate max_results
-        if max_results is not None:
-            if not isinstance(max_results, int):
-                raise ValueError("MaxResults must be an integer")
-            if max_results < 1 or max_results > 100:
-                raise ValueError("MaxResults must be between 1 and 100")
-
-        # Convert byoasn dict to list sorted by asn for consistent pagination
-        byoasn_list = sorted(self.state.byoasn.values(), key=lambda x: (x.asn or "", x.ipamId or ""))
-
-        start_index = 0
-        if next_token:
-            try:
-                start_index = int(next_token)
-            except Exception:
-                raise ValueError("Invalid NextToken")
-
-        end_index = len(byoasn_list)
-        if max_results is not None:
-            end_index = min(start_index + max_results, len(byoasn_list))
-
-        result_byoasn = byoasn_list[start_index:end_index]
-
-        # Prepare response list
-        byoasn_set = []
-        for byoasn_obj in result_byoasn:
-            byoasn_set.append(
-                {
-                    "asn": byoasn_obj.asn,
-                    "ipamId": byoasn_obj.ipamId,
-                    "state": byoasn_obj.state.name if hasattr(byoasn_obj.state, "name") else byoasn_obj.state,
-                    "statusMessage": byoasn_obj.statusMessage,
-                }
+            return create_error_response(
+                "MissingParameter",
+                "Missing required parameter: IpamExternalResourceVerificationTokenId",
             )
 
-        new_next_token = None
-        if end_index < len(byoasn_list):
-            new_next_token = str(end_index)
+        resource = self._find_verification_token(token_id)
+        if not resource:
+            return create_error_response(
+                "InvalidIpamExternalResourceVerificationTokenId.NotFound",
+                f"The ID '{token_id}' does not exist",
+            )
+
+        self.resources.pop(token_id, None)
 
         return {
-            "byoasnSet": byoasn_set,
-            "nextToken": new_next_token,
-            "requestId": self.generate_request_id(),
-        }
-
-    def describe_ipam_external_resource_verification_tokens(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        # Extract parameters
-        filters = params.get("Filter", [])
-        token_ids = params.get("IpamExternalResourceVerificationTokenId", [])
-        max_results = params.get("MaxResults")
-        next_token = params.get("NextToken")
-
-        # Validate MaxResults if provided
-        if max_results is not None:
-            if not isinstance(max_results, int) or max_results < 5 or max_results > 1000:
-                raise ValueError("MaxResults must be an integer between 5 and 1000")
-
-        # Normalize filters to list of Filter objects if dicts
-        normalized_filters = []
-        for f in filters:
-            if isinstance(f, dict):
-                name = f.get("Name")
-                values = f.get("Values", [])
-                normalized_filters.append(Filter(Name=name, Values=values))
-            elif isinstance(f, Filter):
-                normalized_filters.append(f)
-            else:
-                raise ValueError("Filter must be a dict or Filter object")
-
-        # Collect all tokens from state
-        all_tokens = list(self.state.ipam_external_resource_verification_tokens.values())
-
-        # Filter by token IDs if provided
-        if token_ids:
-            all_tokens = [t for t in all_tokens if t.ipamExternalResourceVerificationTokenId in token_ids]
-
-        # Apply filters
-        def token_matches_filter(token: IpamExternalResourceVerificationToken, filter_obj: Filter) -> bool:
-            name = filter_obj.Name
-            values = filter_obj.Values
-            if not name or not values:
-                return True
-            # Map filter names to token attributes
-            attr_map = {
-                "ipam-arn": token.ipamArn,
-                "ipam-external-resource-verification-token-arn": token.ipamExternalResourceVerificationTokenArn,
-                "ipam-external-resource-verification-token-id": token.ipamExternalResourceVerificationTokenId,
-                "ipam-id": token.ipamId,
-                "ipam-region": token.ipamRegion,
-                "state": token.state.name if token.state else None,
-                "status": token.status.name if token.status else None,
-                "token-name": token.tokenName,
-                "token-value": token.tokenValue,
+            'ipamExternalResourceVerificationToken': {
+                'ipamArn': resource.ipam_arn,
+                'ipamExternalResourceVerificationTokenArn': resource.token_arn,
+                'ipamExternalResourceVerificationTokenId': resource.token_id,
+                'ipamId': resource.ipam_id,
+                'ipamRegion': resource.ipam_region,
+                'notAfter': resource.not_after,
+                'state': resource.state,
+                'status': resource.token_status,
+                'tagSet': resource.tag_set,
+                'tokenName': resource.token_name,
+                'tokenValue': resource.token_value,
+                },
             }
-            attr_value = attr_map.get(name)
-            if attr_value is None:
-                return False
-            return any(attr_value == v for v in values)
 
-        for f in normalized_filters:
-            all_tokens = [t for t in all_tokens if token_matches_filter(t, f)]
+    def DeprovisionIpamByoasn(self, params: Dict[str, Any]):
+        """Deprovisions your Autonomous System Number (ASN) from your AWS account. This action can only be called after any BYOIP CIDR associations are removed from your AWS account withDisassociateIpamByoasn.
+            For more information, seeTutorial: Bring your ASN to IPAMin theAmazon VPC IPAM guide."""
 
-        # Pagination
-        start_index = 0
+        asn = params.get("Asn")
+        if not asn:
+            return create_error_response("MissingParameter", "Missing required parameter: Asn")
+        ipam_id = params.get("IpamId")
+        if not ipam_id:
+            return create_error_response("MissingParameter", "Missing required parameter: IpamId")
+
+        ipam = self.state.ipams.get(ipam_id)
+        if not ipam:
+            return create_error_response("InvalidIpamId.NotFound", f"IPAM '{ipam_id}' does not exist.")
+
+        resource = self._find_byoasn(asn, ipam_id)
+        if not resource:
+            return create_error_response("InvalidAsn.NotFound", f"The ASN '{asn}' does not exist")
+
+        if resource.cidr_associations:
+            return create_error_response(
+                "DependencyViolation",
+                "ASN has associated CIDRs and cannot be deprovisioned.",
+            )
+
+        for key, value in list(self.resources.items()):
+            if value is resource:
+                del self.resources[key]
+                break
+
+        return {
+            'byoasn': {
+                'asn': resource.asn,
+                'ipamId': resource.ipam_id,
+                'state': "deprovisioned",
+                'statusMessage': resource.status_message,
+                },
+            }
+
+    def DescribeIpamByoasn(self, params: Dict[str, Any]):
+        """Describes your Autonomous System Numbers (ASNs), their provisioning statuses, and the BYOIP CIDRs with which they are associated. For more information, seeTutorial: Bring your ASN to IPAMin theAmazon VPC IPAM guide."""
+
+        max_results = int(params.get("MaxResults") or 100)
+        next_token = params.get("NextToken")
+        start = 0
         if next_token:
             try:
-                start_index = int(next_token)
-            except Exception:
-                start_index = 0
+                start = int(next_token)
+            except (TypeError, ValueError):
+                start = 0
 
-        end_index = start_index + max_results if max_results else None
-        paged_tokens = all_tokens[start_index:end_index]
-
-        # Prepare next token
+        byoasn_resources = [resource for resource in self.resources.values() if resource.resource_type == "byoasn"]
+        byoasn_dicts = [resource.to_dict() for resource in byoasn_resources]
+        sliced = byoasn_dicts[start:start + max_results]
         new_next_token = None
-        if end_index is not None and end_index < len(all_tokens):
-            new_next_token = str(end_index)
-
-        # Build response token dicts
-        token_dicts = [t.to_dict() for t in paged_tokens]
+        if start + max_results < len(byoasn_dicts):
+            new_next_token = str(start + max_results)
 
         return {
-            "ipamExternalResourceVerificationTokenSet": token_dicts,
-            "nextToken": new_next_token,
-            "requestId": self.generate_request_id(),
-        }
+            'byoasnSet': sliced,
+            'nextToken': new_next_token,
+            }
 
+    def DescribeIpamExternalResourceVerificationTokens(self, params: Dict[str, Any]):
+        """Describe verification tokens. A verification token is an AWS-generated random value that you can use to prove ownership of an external resource. For example, you can use a verification token to validate that you control a public IP address range when you bring an IP address range to AWS (BYOIP)."""
 
-    def disassociate_ipam_byoasn(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        token_ids = params.get("IpamExternalResourceVerificationTokenId.N", []) or []
+        if token_ids:
+            for token_id in token_ids:
+                if not self._find_verification_token(token_id):
+                    return create_error_response(
+                        "InvalidIpamExternalResourceVerificationTokenId.NotFound",
+                        f"The ID '{token_id}' does not exist",
+                    )
+
+        resources = self._list_verification_tokens()
+        if token_ids:
+            resources = [resource for resource in resources if resource.token_id in token_ids]
+
+        filters = params.get("Filter.N", []) or []
+        if filters:
+            resources = apply_filters(resources, filters)
+
+        max_results = int(params.get("MaxResults") or 100)
+        next_token = params.get("NextToken")
+        start = 0
+        if next_token:
+            try:
+                start = int(next_token)
+            except (TypeError, ValueError):
+                start = 0
+
+        sliced = resources[start:start + max_results]
+        new_next_token = None
+        if start + max_results < len(resources):
+            new_next_token = str(start + max_results)
+
+        token_set = []
+        for resource in sliced:
+            token_set.append({
+                'ipamArn': resource.ipam_arn,
+                'ipamExternalResourceVerificationTokenArn': resource.token_arn,
+                'ipamExternalResourceVerificationTokenId': resource.token_id,
+                'ipamId': resource.ipam_id,
+                'ipamRegion': resource.ipam_region,
+                'notAfter': resource.not_after,
+                'state': resource.state,
+                'status': resource.token_status,
+                'tagSet': resource.tag_set,
+                'tokenName': resource.token_name,
+                'tokenValue': resource.token_value,
+            })
+
+        return {
+            'ipamExternalResourceVerificationTokenSet': token_set,
+            'nextToken': new_next_token,
+            }
+
+    def DisassociateIpamByoasn(self, params: Dict[str, Any]):
+        """Remove the association between your Autonomous System Number (ASN) and your BYOIP CIDR. You may want to use this action to disassociate an ASN from a CIDR or if you want to swap ASNs. 
+            For more information, seeTutorial: Bring your ASN to IPAMin theAmazon VPC IPAM guide."""
+
         asn = params.get("Asn")
+        if not asn:
+            return create_error_response("MissingParameter", "Missing required parameter: Asn")
         cidr = params.get("Cidr")
-
-        if not asn:
-            raise ValueError("Asn is required")
         if not cidr:
-            raise ValueError("Cidr is required")
+            return create_error_response("MissingParameter", "Missing required parameter: Cidr")
 
-        # Find the association in state.byoasn associations
-        # Associations are stored in self.state.byoasn_associations or similar? 
-        # But we only have self.state.byoasn (dict keyed by asn?), so we must find association by asn and cidr
-        # The problem statement does not specify a separate associations dict, so we assume associations are stored in self.state.byoasn_associations keyed by (asn, cidr) or similar
-        # Since no such dict is specified, we must assume self.state.byoasn_associations exists or we must create it
-        # But instructions say always use self.state.byoasn (plural) dict for BYOASN resources
-        # So likely associations are stored in self.state.byoasn_associations or self.state.byoasn_associations dict
-        # Since no such dict is specified, we must assume associations are stored in self.state.byoasn_associations keyed by (asn, cidr)
-        # For safety, we check self.state.byoasn_associations dict for the association
+        resource = self._find_byoasn(asn)
+        if not resource:
+            return create_error_response("InvalidAsn.NotFound", f"The ASN '{asn}' does not exist")
 
-        # Let's assume self.state.byoasn_associations is a dict keyed by (asn, cidr) tuple
-        # If not found, create a new AsnAssociation with state disassociated
-
-        # If self.state.byoasn_associations does not exist, create it
-        if not hasattr(self.state, "byoasn_associations"):
-            self.state.byoasn_associations = {}
-
-        key = (asn, cidr)
-        association = self.state.byoasn_associations.get(key)
-
-        if association is None:
-            # Create a new association with state disassociated
-            association = AsnAssociation()
-            association.asn = asn
-            association.cidr = cidr
-            # Set state to disassociated enum member
-            # We must find the enum member for disassociated state
-            # Assuming AsnAssociationState enum has member DISASSOCIATED
-            # If not, fallback to string "disassociated"
-            try:
-                association.state = AsnAssociationState.DISASSOCIATED
-            except Exception:
-                association.state = "disassociated"
-            association.statusMessage = "Association disassociated"
-            self.state.byoasn_associations[key] = association
-        else:
-            # Update existing association state to disassociated
-            try:
-                association.state = AsnAssociationState.DISASSOCIATED
-            except Exception:
-                association.state = "disassociated"
-            association.statusMessage = "Association disassociated"
+        if cidr in resource.cidr_associations:
+            resource.cidr_associations.remove(cidr)
 
         return {
-            "asnAssociation": association.to_dict(),
-            "requestId": self.generate_request_id(),
-        }
+            'asnAssociation': {
+                'asn': asn,
+                'cidr': cidr,
+                'state': "disassociated",
+                'statusMessage': resource.status_message,
+                },
+            }
 
+    def ProvisionIpamByoasn(self, params: Dict[str, Any]):
+        """Provisions your Autonomous System Number (ASN) for use in your AWS account. This action requires authorization context for Amazon to bring the ASN to an AWS account. For more information, seeTutorial: Bring your ASN to IPAMin theAmazon VPC IPAM guide."""
 
-    def provision_ipam_byoasn(self, params: Dict[str, Any]) -> Dict[str, Any]:
         asn = params.get("Asn")
-        auth_context = params.get("AsnAuthorizationContext")
-        ipam_id = params.get("IpamId")
-
         if not asn:
-            raise ValueError("Asn is required")
-        if not auth_context or not isinstance(auth_context, dict):
-            raise ValueError("AsnAuthorizationContext is required and must be a dict")
+            return create_error_response("MissingParameter", "Missing required parameter: Asn")
+        asn_auth = params.get("AsnAuthorizationContext")
+        if not asn_auth:
+            return create_error_response("MissingParameter", "Missing required parameter: AsnAuthorizationContext")
+        ipam_id = params.get("IpamId")
         if not ipam_id:
-            raise ValueError("IpamId is required")
+            return create_error_response("MissingParameter", "Missing required parameter: IpamId")
 
-        message = auth_context.get("Message")
-        signature = auth_context.get("Signature")
-        if not message:
-            raise ValueError("AsnAuthorizationContext.Message is required")
-        if not signature:
-            raise ValueError("AsnAuthorizationContext.Signature is required")
+        ipam = self.state.ipams.get(ipam_id)
+        if not ipam:
+            return create_error_response("InvalidIpamId.NotFound", f"IPAM '{ipam_id}' does not exist.")
 
-        # Check if BYOASN already exists for this ASN
-        byoasn = self.state.byoasn.get(asn)
-        if byoasn is None:
-            byoasn = Byoasn()
-            byoasn.asn = asn
-            byoasn.ipamId = ipam_id
-            # Set state to pending-provision
-            try:
-                byoasn.state = ByoasnState.PENDING_PROVISION
-            except Exception:
-                byoasn.state = "pending-provision"
-            byoasn.statusMessage = "Provisioning in progress"
-            self.state.byoasn[asn] = byoasn
+        resource = self._find_byoasn(asn, ipam_id)
+        if not resource:
+            resource_id = self._generate_id("ipam")
+            resource = BYOASN(
+                asn=asn,
+                ipam_id=ipam_id,
+                state="provisioned",
+                status_message="",
+                resource_type="byoasn",
+                asn_authorization_context=asn_auth,
+            )
+            self.resources[resource_id] = resource
         else:
-            # Update existing byoasn
-            byoasn.ipamId = ipam_id
-            try:
-                byoasn.state = ByoasnState.PENDING_PROVISION
-            except Exception:
-                byoasn.state = "pending-provision"
-            byoasn.statusMessage = "Provisioning in progress"
-
-        # For emulator, we can simulate immediate provisioning success
-        try:
-            byoasn.state = ByoasnState.PROVISIONED
-        except Exception:
-            byoasn.state = "provisioned"
-        byoasn.statusMessage = "Provisioned successfully"
+            resource.state = "provisioned"
+            resource.asn_authorization_context = asn_auth
 
         return {
-            "byoasn": byoasn.to_dict(),
-            "requestId": self.generate_request_id(),
+            'byoasn': {
+                'asn': resource.asn,
+                'ipamId': resource.ipam_id,
+                'state': resource.state,
+                'statusMessage': resource.status_message,
+                },
+            }
+
+    def _generate_id(self, prefix: str = 'ipam') -> str:
+        return f'{prefix}-{uuid.uuid4().hex[:17]}'
+
+from typing import Dict, List, Any, Optional
+from ..utils import get_scalar, get_int, get_indexed_list, parse_filters, parse_tags, str2bool, esc
+from ..utils import is_error_response, serialize_error_response
+
+class byoasn_RequestParser:
+    @staticmethod
+    def parse_associate_ipam_byoasn_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "Asn": get_scalar(md, "Asn"),
+            "Cidr": get_scalar(md, "Cidr"),
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
         }
 
-    
+    @staticmethod
+    def parse_create_ipam_external_resource_verification_token_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "ClientToken": get_scalar(md, "ClientToken"),
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "IpamId": get_scalar(md, "IpamId"),
+            "TagSpecification.N": parse_tags(md, "TagSpecification"),
+        }
 
-from emulator_core.gateway.base import BaseGateway
+    @staticmethod
+    def parse_delete_ipam_external_resource_verification_token_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "IpamExternalResourceVerificationTokenId": get_scalar(md, "IpamExternalResourceVerificationTokenId"),
+        }
 
-class BYOASNGateway(BaseGateway):
-    def __init__(self, backend):
-        super().__init__(backend)
-        self.register_action("AssociateIpamByoasn", self.associate_ipam_byoasn)
-        self.register_action("CreateIpamExternalResourceVerificationToken", self.create_ipam_external_resource_verification_token)
-        self.register_action("DeleteIpamExternalResourceVerificationToken", self.delete_ipam_external_resource_verification_token)
-        self.register_action("DeprovisionIpamByoasn", self.deprovision_ipam_byoasn)
-        self.register_action("DescribeIpamByoasn", self.describe_ipam_byoasn)
-        self.register_action("DescribeIpamExternalResourceVerificationTokens", self.describe_ipam_external_resource_verification_tokens)
-        self.register_action("DisassociateIpamByoasn", self.disassociate_ipam_byoasn)
-        self.register_action("ProvisionIpamByoasn", self.provision_ipam_byoasn)
+    @staticmethod
+    def parse_deprovision_ipam_byoasn_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "Asn": get_scalar(md, "Asn"),
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "IpamId": get_scalar(md, "IpamId"),
+        }
 
-    def associate_ipam_byoasn(self, params):
-        return self.backend.associate_ipam_byoasn(params)
+    @staticmethod
+    def parse_describe_ipam_byoasn_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "MaxResults": get_int(md, "MaxResults"),
+            "NextToken": get_scalar(md, "NextToken"),
+        }
 
-    def create_ipam_external_resource_verification_token(self, params):
-        return self.backend.create_ipam_external_resource_verification_token(params)
+    @staticmethod
+    def parse_describe_ipam_external_resource_verification_tokens_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "Filter.N": parse_filters(md, "Filter"),
+            "IpamExternalResourceVerificationTokenId.N": get_indexed_list(md, "IpamExternalResourceVerificationTokenId"),
+            "MaxResults": get_int(md, "MaxResults"),
+            "NextToken": get_scalar(md, "NextToken"),
+        }
 
-    def delete_ipam_external_resource_verification_token(self, params):
-        return self.backend.delete_ipam_external_resource_verification_token(params)
+    @staticmethod
+    def parse_disassociate_ipam_byoasn_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "Asn": get_scalar(md, "Asn"),
+            "Cidr": get_scalar(md, "Cidr"),
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+        }
 
-    def deprovision_ipam_byoasn(self, params):
-        return self.backend.deprovision_ipam_byoasn(params)
+    @staticmethod
+    def parse_provision_ipam_byoasn_request(md: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "Asn": get_scalar(md, "Asn"),
+            "AsnAuthorizationContext": get_scalar(md, "AsnAuthorizationContext"),
+            "DryRun": str2bool(get_scalar(md, "DryRun")),
+            "IpamId": get_scalar(md, "IpamId"),
+        }
 
-    def describe_ipam_byoasn(self, params):
-        return self.backend.describe_ipam_byoasn(params)
+    @staticmethod
+    def parse_request(action: str, md: Dict[str, Any]) -> Dict[str, Any]:
+        parsers = {
+            "AssociateIpamByoasn": byoasn_RequestParser.parse_associate_ipam_byoasn_request,
+            "CreateIpamExternalResourceVerificationToken": byoasn_RequestParser.parse_create_ipam_external_resource_verification_token_request,
+            "DeleteIpamExternalResourceVerificationToken": byoasn_RequestParser.parse_delete_ipam_external_resource_verification_token_request,
+            "DeprovisionIpamByoasn": byoasn_RequestParser.parse_deprovision_ipam_byoasn_request,
+            "DescribeIpamByoasn": byoasn_RequestParser.parse_describe_ipam_byoasn_request,
+            "DescribeIpamExternalResourceVerificationTokens": byoasn_RequestParser.parse_describe_ipam_external_resource_verification_tokens_request,
+            "DisassociateIpamByoasn": byoasn_RequestParser.parse_disassociate_ipam_byoasn_request,
+            "ProvisionIpamByoasn": byoasn_RequestParser.parse_provision_ipam_byoasn_request,
+        }
+        if action not in parsers:
+            raise ValueError(f"Unknown action: {action}")
+        return parsers[action](md)
 
-    def describe_ipam_external_resource_verification_tokens(self, params):
-        return self.backend.describe_ipam_external_resource_verification_tokens(params)
+class byoasn_ResponseSerializer:
+    @staticmethod
+    def _serialize_dict_to_xml(d: Dict[str, Any], tag_name: str, indent_level: int) -> List[str]:
+        """Serialize a dictionary to XML elements."""
+        xml_parts = []
+        indent = '    ' * indent_level
+        for key, value in d.items():
+            if value is None:
+                continue
+            elif isinstance(value, dict):
+                xml_parts.append(f'{indent}<{key}>')
+                xml_parts.extend(byoasn_ResponseSerializer._serialize_dict_to_xml(value, key, indent_level + 1))
+                xml_parts.append(f'{indent}</{key}>')
+            elif isinstance(value, list):
+                xml_parts.extend(byoasn_ResponseSerializer._serialize_list_to_xml(value, key, indent_level))
+            elif isinstance(value, bool):
+                xml_parts.append(f'{indent}<{key}>{str(value).lower()}</{key}>')
+            else:
+                xml_parts.append(f'{indent}<{key}>{esc(str(value))}</{key}>')
+        return xml_parts
 
-    def disassociate_ipam_byoasn(self, params):
-        return self.backend.disassociate_ipam_byoasn(params)
+    @staticmethod
+    def _serialize_list_to_xml(lst: List[Any], tag_name: str, indent_level: int) -> List[str]:
+        """Serialize a list to XML elements with <tagName> wrapper and <item> children."""
+        xml_parts = []
+        indent = '    ' * indent_level
+        xml_parts.append(f'{indent}<{tag_name}>')
+        for item in lst:
+            if isinstance(item, dict):
+                xml_parts.append(f'{indent}    <item>')
+                xml_parts.extend(byoasn_ResponseSerializer._serialize_dict_to_xml(item, 'item', indent_level + 2))
+                xml_parts.append(f'{indent}    </item>')
+            elif isinstance(item, list):
+                xml_parts.extend(byoasn_ResponseSerializer._serialize_list_to_xml(item, tag_name, indent_level + 1))
+            else:
+                xml_parts.append(f'{indent}    <item>{esc(str(item))}</item>')
+        xml_parts.append(f'{indent}</{tag_name}>')
+        return xml_parts
 
-    def provision_ipam_byoasn(self, params):
-        return self.backend.provision_ipam_byoasn(params)
+    @staticmethod
+    def _serialize_nested_fields(d: Dict[str, Any], indent_level: int) -> List[str]:
+        """Serialize nested fields from a dictionary."""
+        xml_parts = []
+        indent = '    ' * indent_level
+        for key, value in d.items():
+            if value is None:
+                continue
+            elif isinstance(value, dict):
+                xml_parts.append(f'{indent}<{key}>')
+                xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(value, indent_level + 1))
+                xml_parts.append(f'{indent}</{key}>')
+            elif isinstance(value, list):
+                xml_parts.append(f'{indent}<{key}>')
+                for item in value:
+                    if isinstance(item, dict):
+                        xml_parts.append(f'{indent}    <item>')
+                        xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(item, indent_level + 2))
+                        xml_parts.append(f'{indent}    </item>')
+                    else:
+                        xml_parts.append(f'{indent}    <item>{esc(str(item))}</item>')
+                xml_parts.append(f'{indent}</{key}>')
+            elif isinstance(value, bool):
+                xml_parts.append(f'{indent}<{key}>{str(value).lower()}</{key}>')
+            else:
+                xml_parts.append(f'{indent}<{key}>{esc(str(value))}</{key}>')
+        return xml_parts
+
+    @staticmethod
+    def serialize_associate_ipam_byoasn_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<AssociateIpamByoasnResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize asnAssociation
+        _asnAssociation_key = None
+        if "asnAssociation" in data:
+            _asnAssociation_key = "asnAssociation"
+        elif "AsnAssociation" in data:
+            _asnAssociation_key = "AsnAssociation"
+        if _asnAssociation_key:
+            param_data = data[_asnAssociation_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<asnAssociation>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</asnAssociation>')
+        xml_parts.append(f'</AssociateIpamByoasnResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_create_ipam_external_resource_verification_token_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<CreateIpamExternalResourceVerificationTokenResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize ipamExternalResourceVerificationToken
+        _ipamExternalResourceVerificationToken_key = None
+        if "ipamExternalResourceVerificationToken" in data:
+            _ipamExternalResourceVerificationToken_key = "ipamExternalResourceVerificationToken"
+        elif "IpamExternalResourceVerificationToken" in data:
+            _ipamExternalResourceVerificationToken_key = "IpamExternalResourceVerificationToken"
+        if _ipamExternalResourceVerificationToken_key:
+            param_data = data[_ipamExternalResourceVerificationToken_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<ipamExternalResourceVerificationToken>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</ipamExternalResourceVerificationToken>')
+        xml_parts.append(f'</CreateIpamExternalResourceVerificationTokenResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_delete_ipam_external_resource_verification_token_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<DeleteIpamExternalResourceVerificationTokenResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize ipamExternalResourceVerificationToken
+        _ipamExternalResourceVerificationToken_key = None
+        if "ipamExternalResourceVerificationToken" in data:
+            _ipamExternalResourceVerificationToken_key = "ipamExternalResourceVerificationToken"
+        elif "IpamExternalResourceVerificationToken" in data:
+            _ipamExternalResourceVerificationToken_key = "IpamExternalResourceVerificationToken"
+        if _ipamExternalResourceVerificationToken_key:
+            param_data = data[_ipamExternalResourceVerificationToken_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<ipamExternalResourceVerificationToken>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</ipamExternalResourceVerificationToken>')
+        xml_parts.append(f'</DeleteIpamExternalResourceVerificationTokenResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_deprovision_ipam_byoasn_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<DeprovisionIpamByoasnResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize byoasn
+        _byoasn_key = None
+        if "byoasn" in data:
+            _byoasn_key = "byoasn"
+        elif "Byoasn" in data:
+            _byoasn_key = "Byoasn"
+        if _byoasn_key:
+            param_data = data[_byoasn_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<byoasn>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</byoasn>')
+        xml_parts.append(f'</DeprovisionIpamByoasnResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_describe_ipam_byoasn_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<DescribeIpamByoasnResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize byoasnSet
+        _byoasnSet_key = None
+        if "byoasnSet" in data:
+            _byoasnSet_key = "byoasnSet"
+        elif "ByoasnSet" in data:
+            _byoasnSet_key = "ByoasnSet"
+        elif "Byoasns" in data:
+            _byoasnSet_key = "Byoasns"
+        if _byoasnSet_key:
+            param_data = data[_byoasnSet_key]
+            indent_str = "    " * 1
+            if param_data:
+                xml_parts.append(f'{indent_str}<byoasnSet>')
+                for item in param_data:
+                    xml_parts.append(f'{indent_str}    <item>')
+                    xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(item, 2))
+                    xml_parts.append(f'{indent_str}    </item>')
+                xml_parts.append(f'{indent_str}</byoasnSet>')
+            else:
+                xml_parts.append(f'{indent_str}<byoasnSet/>')
+        # Serialize nextToken
+        _nextToken_key = None
+        if "nextToken" in data:
+            _nextToken_key = "nextToken"
+        elif "NextToken" in data:
+            _nextToken_key = "NextToken"
+        if _nextToken_key:
+            param_data = data[_nextToken_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<nextToken>{esc(str(param_data))}</nextToken>')
+        xml_parts.append(f'</DescribeIpamByoasnResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_describe_ipam_external_resource_verification_tokens_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<DescribeIpamExternalResourceVerificationTokensResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize ipamExternalResourceVerificationTokenSet
+        _ipamExternalResourceVerificationTokenSet_key = None
+        if "ipamExternalResourceVerificationTokenSet" in data:
+            _ipamExternalResourceVerificationTokenSet_key = "ipamExternalResourceVerificationTokenSet"
+        elif "IpamExternalResourceVerificationTokenSet" in data:
+            _ipamExternalResourceVerificationTokenSet_key = "IpamExternalResourceVerificationTokenSet"
+        elif "IpamExternalResourceVerificationTokens" in data:
+            _ipamExternalResourceVerificationTokenSet_key = "IpamExternalResourceVerificationTokens"
+        if _ipamExternalResourceVerificationTokenSet_key:
+            param_data = data[_ipamExternalResourceVerificationTokenSet_key]
+            indent_str = "    " * 1
+            if param_data:
+                xml_parts.append(f'{indent_str}<ipamExternalResourceVerificationTokenSet>')
+                for item in param_data:
+                    xml_parts.append(f'{indent_str}    <item>')
+                    xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(item, 2))
+                    xml_parts.append(f'{indent_str}    </item>')
+                xml_parts.append(f'{indent_str}</ipamExternalResourceVerificationTokenSet>')
+            else:
+                xml_parts.append(f'{indent_str}<ipamExternalResourceVerificationTokenSet/>')
+        # Serialize nextToken
+        _nextToken_key = None
+        if "nextToken" in data:
+            _nextToken_key = "nextToken"
+        elif "NextToken" in data:
+            _nextToken_key = "NextToken"
+        if _nextToken_key:
+            param_data = data[_nextToken_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<nextToken>{esc(str(param_data))}</nextToken>')
+        xml_parts.append(f'</DescribeIpamExternalResourceVerificationTokensResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_disassociate_ipam_byoasn_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<DisassociateIpamByoasnResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize asnAssociation
+        _asnAssociation_key = None
+        if "asnAssociation" in data:
+            _asnAssociation_key = "asnAssociation"
+        elif "AsnAssociation" in data:
+            _asnAssociation_key = "AsnAssociation"
+        if _asnAssociation_key:
+            param_data = data[_asnAssociation_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<asnAssociation>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</asnAssociation>')
+        xml_parts.append(f'</DisassociateIpamByoasnResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize_provision_ipam_byoasn_response(data: Dict[str, Any], request_id: str) -> str:
+        xml_parts = []
+        xml_parts.append(f'<ProvisionIpamByoasnResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">')
+        xml_parts.append(f'    <requestId>{esc(request_id)}</requestId>')
+        # Serialize byoasn
+        _byoasn_key = None
+        if "byoasn" in data:
+            _byoasn_key = "byoasn"
+        elif "Byoasn" in data:
+            _byoasn_key = "Byoasn"
+        if _byoasn_key:
+            param_data = data[_byoasn_key]
+            indent_str = "    " * 1
+            xml_parts.append(f'{indent_str}<byoasn>')
+            xml_parts.extend(byoasn_ResponseSerializer._serialize_nested_fields(param_data, 2))
+            xml_parts.append(f'{indent_str}</byoasn>')
+        xml_parts.append(f'</ProvisionIpamByoasnResponse>')
+        return "\n".join(xml_parts)
+
+    @staticmethod
+    def serialize(action: str, data: Dict[str, Any], request_id: str) -> str:
+        # Check for error response from backend
+        if is_error_response(data):
+            return serialize_error_response(data, request_id)
+        
+        serializers = {
+            "AssociateIpamByoasn": byoasn_ResponseSerializer.serialize_associate_ipam_byoasn_response,
+            "CreateIpamExternalResourceVerificationToken": byoasn_ResponseSerializer.serialize_create_ipam_external_resource_verification_token_response,
+            "DeleteIpamExternalResourceVerificationToken": byoasn_ResponseSerializer.serialize_delete_ipam_external_resource_verification_token_response,
+            "DeprovisionIpamByoasn": byoasn_ResponseSerializer.serialize_deprovision_ipam_byoasn_response,
+            "DescribeIpamByoasn": byoasn_ResponseSerializer.serialize_describe_ipam_byoasn_response,
+            "DescribeIpamExternalResourceVerificationTokens": byoasn_ResponseSerializer.serialize_describe_ipam_external_resource_verification_tokens_response,
+            "DisassociateIpamByoasn": byoasn_ResponseSerializer.serialize_disassociate_ipam_byoasn_response,
+            "ProvisionIpamByoasn": byoasn_ResponseSerializer.serialize_provision_ipam_byoasn_response,
+        }
+        if action not in serializers:
+            raise ValueError(f"Unknown action: {action}")
+        return serializers[action](data, request_id)
+
