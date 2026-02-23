@@ -1,14 +1,1 @@
-.venv/
-__pycache__/
-.python-version
-.terraform/
-.terraform.lock.hcl
-.terraform.tfstate.lock.info
-terraform.tfstate
-terraform.tfstate.backup
-_vera_override.tf
-.bin/
-vera_aws.egg-info/
-eval_results*.json
-eval_test*.json
-attributes.json
+./.*

@@ -1,0 +1,17 @@
+[project]
+name = "vera-gcp"
+version = "1"
+description = "A local GCP Compute service emulator for development and testing"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+sdk = [
+    "google-cloud-compute>=1.0",
+]
+
+[project.scripts]
+vera-gcp = "main:main"

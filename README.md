@@ -1,213 +1,80 @@
-# Vera AWS
+# Vera
 
-Local Amazon EC2 emulator
-Version 1 : 89 resource types — VPCs, instances, security groups, volumes, and more (complete list at the end) — running on your machine with no AWS account needed.
+Local cloud emulators for AWS and GCP — build and test infrastructure on your machine, no account required.
 
 Check out the [Vera website](https://project-vera.github.io/) for more information.
 
-## Setup
+---
+
+## What is Vera?
+
+Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, and teardown is never instant.
+
+Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools — the AWS CLI, the gcloud CLI, Terraform, Python SDKs — behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, and no cleanup required.
+
+---
+
+## Why Vera?
+
+**No account needed.** Vera ships with fake credentials built in. You never authenticate against a real cloud provider, which means there's nothing to sign up for, nothing to configure, and no risk of accidentally hitting production.
+
+**Fast feedback.** Because requests never leave your machine, operations that would take seconds or minutes against a real cloud complete instantly. Iterating on infrastructure code becomes as fast as iterating on any other code.
+
+**Works with your existing tools.** Vera doesn't require you to change how you write infrastructure. Standard AWS CLI commands, standard `gcloud` commands, standard Terraform configurations — all of them work against Vera without modification.
+
+**Safe by default.** There's no way to accidentally destroy a real resource or incur a surprise bill. Every resource lives in memory and disappears when you stop the emulator.
+
+**Broad coverage.** Vera covers 89 AWS EC2 resource types and 91 GCP Compute resource types — VPCs, instances, disks, firewalls, load balancers, routing, snapshots, and much more. It handles the full lifecycle of the resources developers actually use day to day.
+
+---
+
+## The Emulators
+
+### Vera AWS
+
+Emulates the Amazon EC2 API with support for 89 resource types. Drop-in wrappers for the AWS CLI (`awscli`) and Terraform (`terlocal`) are included, so you can run your existing commands and configurations unchanged.
+
+In head-to-head testing against 260 real AWS CLI commands, Vera AWS passes **80%** — compared to **47%** for LocalStack.
+
+→ [Vera AWS documentation](emulators/aws-ec2/README.md)
+
+---
+
+### Vera GCP
+
+Emulates the Google Cloud Compute API with support for 91 resource types. A drop-in wrapper for the gcloud CLI (`gcpcli`) handles credential isolation automatically, so `gcloud compute` commands route to the local emulator with no real Google account required. The Google Cloud Compute Python SDK is also supported.
+
+Seeded resources (a default network, common zones, machine types, and image families) are available immediately on startup with no setup needed.
+
+→ [Vera GCP documentation](emulators/google-compute/README.md)
+
+---
+
+## Quick Start
+
+Each emulator lives in its own directory under `emulators/`. Setup is a single command:
 
 ```bash
+# AWS
+cd emulators/aws-ec2
 ./install.sh
+uv run main.py   # http://localhost:5003
+
+# GCP
+cd emulators/google-compute
+./install.sh
+uv run main.py   # http://localhost:9100
 ```
 
-This creates a venv, installs dependencies, sets up dummy AWS credentials (`~/.aws/credentials`), and generates two wrapper scripts in `.venv/bin/`:
+From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their real counterparts. See the individual READMEs for usage examples, test suites, and the full list of supported resources.
 
-- **`awscli`** — drop-in for `aws`, routes requests to the emulator
-- **`terlocal`** — drop-in for `terraform`, configures the AWS provider endpoint
-
-### Prerequisites
-
-- Python 3.13+
-- AWS CLI and Terraform are installed automatically by `install.sh` if missing (macOS/Linux)
-
-## Usage
-
-Start the emulator on one terminal:
-
-```bash
-uv run main.py
-# Running at http://localhost:5003
-```
-
-### AWS CLI via `uv run awscli`
-
-```bash
-uv run awscli ec2 create-vpc --cidr-block 10.0.0.0/16
-# {
-#     "Vpc": {
-#         "VpcId": "vpc-28bc3a23",
-#         "CidrBlock": "10.0.0.0/16",
-#         "State": "available",
-#         ...
-#     }
-# }
-```
-
-### AWS CLI directly via `awscli`
-
-Simply activate the venv and run `awscli`:
-```bash
-source .venv/bin/activate
-
-awscli ec2 describe-vpcs
-awscli ec2 run-instances --image-id ami-12345678 --instance-type t2.micro
-awscli ec2 describe-instances
-```
-
-### Terraform
-
-Write standard Terraform — no provider overrides needed:
-
-```hcl
-provider "aws" {
-  region = "us-east-1"
-}
-
-resource "aws_vpc" "main" {
-  cidr_block = "10.0.0.0/16"
-}
-```
-
-Then use `uv run terlocal` instead of `terraform`. Or simply activate the venv and directly run `terlocal`:
-
-```bash
-source .venv/bin/activate
-
-terlocal init
-terlocal apply -auto-approve
-terlocal destroy -auto-approve
-```
-
-See `tests/tf/` for more examples.
-
-## Running Tests
-
-```bash
-# Terminal 1 — start the emulator
-uv run main.py
-
-# Terminal 2 — run 260 CLI commands against it
-cd tests
-uv run eval_emulator.py test.sh --endpoint http://localhost:5003 \
-  --checkpoint eval_results.json --start-from 0
-uv run analyze_results.py eval_results.json
-
-# Terraform smoke test
-cd tests/tf/00-simple-vpc
-uv run terlocal init && uv run terlocal apply -auto-approve
-```
-
-| Emulator | Passing (260 commands) |
-|---|---|
-| LocalStack | 122 (47%) |
-| **Vera AWS v1** | **208 (80%)** |
-
-## Project Structure
-
-```
-main.py                        Flask server (port 5003)
-install.sh                     Sets up awscli/terlocal wrappers
-emulator_core/
-├── state.py                   In-memory resource store (EC2State singleton)
-├── utils.py                   Shared request parsing and response utilities
-└── services/                  89 resource modules
-tests/
-├── test.sh                    260 CLI commands (awscli wrapper)
-├── eval_emulator.py           Evaluator with checkpointing
-└── tf/                        Terraform test cases
-```
+---
 
 ## Supported Resources
 
-Vera AWS supports the following resources (via EC2 API):
+| Emulator | Resources | CLI pass rate |
+|---|---|---|
+| Vera AWS | 89 EC2 resource types | 80% (208 / 260 commands) |
+| Vera GCP | 91 Compute resource types | — |
 
-- Account Attributes
-- AFIs
-- AMIs
-- Authorization Rules
-- AWS Marketplace
-- Block Public Access
-- Bundle Tasks
-- BYOASN
-- BYOIP
-- Capacity Reservations
-- Carrier Gateways
-- Certificate Revocation Lists
-- Client Connections
-- Client VPN Endpoints
-- Configuration Files
-- Customer Gateways
-- Customer Owned IP Addresses
-- Declarative Policies (Account Status Report)
-- Dedicated Hosts
-- DHCP Options
-- EC2 Fleet
-- EC2 Instance Connect Endpoints
-- EC2 Topology
-- Elastic Graphics
-- Elastic IP Addresses
-- Elastic Network Interfaces
-- Encryption
-- Event Notifications
-- Event Windows For Scheduled Events
-- Fast Snapshot Restores
-- Infrastructure Performance
-- Instance Types
-- Instances
-- Internet Gateways
-- IPAMs
-- Key Pairs
-- Launch Templates
-- Link Aggregation Groups
-- Local Gateways
-- Managed Prefix Lists
-- NAT Gateways
-- Network Access Analyzer
-- Network ACLs
-- Nitro TPM
-- Placement Groups
-- Pools
-- Reachability Analyzer
-- Regions And Zones
-- Reserved Instances
-- Resource Discoveries
-- Resource IDs
-- Route Servers
-- Route Tables
-- Routes
-- Scheduled Instances
-- Scopes
-- Security Groups
-- Serial Console
-- Service Links
-- Snapshots
-- Spot Fleet
-- Spot Instances
-- Subnets
-- Tags
-- Target Networks
-- Traffic Mirroring
-- Transit Gateway Connect
-- Transit Gateway Multicast
-- Transit Gateway Peering Attachments
-- Transit Gateway Policy Tables
-- Transit Gateway Route Tables
-- Transit Gateways
-- Verified Access Endpoints
-- Verified Access Groups
-- Verified Access Instances
-- Verified Access Logs
-- Verified Access Trust Providers
-- Virtual Private Gateway Routes
-- Virtual Private Gateways
-- VM Export
-- VM Import
-- Volumes
-- VPC Endpoint Services
-- VPC Endpoints
-- VPC Flow Logs
-- VPC Peering
-- VPCs
-- VPN Concentrators
-- VPN Connections
+Full resource lists are in each emulator's README.
