@@ -1,6 +1,6 @@
 # Vera
 
-Local cloud emulators for AWS and GCP — build and test infrastructure on your machine, no account required.
+We are on a mission to build high-fidelity local emulators for cloud, and have started off with AWS and GCP (currently for corresponding compute services). Now anyone can build and test infrastructure on your machine, no account required.
 
 Check out the [Vera website](https://project-vera.github.io/) for more information.
 
@@ -10,7 +10,7 @@ Check out the [Vera website](https://project-vera.github.io/) for more informati
 
 Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, and teardown is never instant.
 
-Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools — the AWS CLI, the gcloud CLI, Terraform, Python SDKs — behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, and no cleanup required.
+Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools: CLI, Terraform, Python SDKs behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, and no cleanup required.
 
 ---
 
@@ -58,12 +58,12 @@ Each emulator lives in its own directory under `emulators/`. Setup is a single c
 # AWS
 cd emulators/aws-ec2
 ./install.sh
-uv run main.py   # http://localhost:5003
+uv run main.py  
 
 # GCP
 cd emulators/google-compute
 ./install.sh
-uv run main.py   # http://localhost:9100
+uv run main.py  
 ```
 
 From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their real counterparts. See the individual READMEs for usage examples, test suites, and the full list of supported resources.
@@ -72,9 +72,9 @@ From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their rea
 
 ## Supported Resources
 
-| Emulator | Resources | CLI pass rate |
+| Emulator | Resources |
 |---|---|---|
-| Vera AWS | 89 EC2 resource types | 80% (208 / 260 commands) |
-| Vera GCP | 91 Compute resource types | — |
+| Vera AWS | 89 EC2 resource types |
+| Vera GCP | 91 Compute resource types |
 
 Full resource lists are in each emulator's README.
