@@ -1,4 +1,7 @@
-# Vera
+
+<p align="center">
+  <img src="assets/icon.png" alt="Vera" width="50%">
+</p>
 
 We are on a mission to build high-fidelity local emulators for cloud, and have started off with AWS and GCP (currently for corresponding compute services). Now anyone can build and test infrastructure on your machine, no account required.
 
@@ -12,12 +15,11 @@ Cloud infrastructure is expensive to experiment with. Even a quick test — spin
 
 Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools: CLI, Terraform, Python SDKs behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, and no cleanup required.
 
----
 
 ## Why Vera?
 
 <p align="center">
-  <img src="assets/logo2.png" alt="Why Vera" width="80%">
+  <img src="assets/why-vera2.png" alt="Why Vera" width="80%">
 </p>
 
 **No account needed.** Vera ships with fake credentials built in. You never authenticate against a real cloud provider, which means there's nothing to sign up for, nothing to configure, and no risk of accidentally hitting production.
@@ -30,7 +32,6 @@ Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services an
 
 **Broad coverage.** Vera covers 89 AWS EC2 resource types and 91 GCP Compute resource types — VPCs, instances, disks, firewalls, load balancers, routing, snapshots, and much more. It handles the full lifecycle of the resources developers actually use day to day.
 
----
 
 ## The Emulators
 
@@ -72,13 +73,12 @@ uv run main.py
 
 From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their real counterparts. See the individual READMEs for usage examples, test suites, and the full list of supported resources.
 
----
 
-## Supported Resources
+## Supported Resources (More resources coming soon!)
 
-| Emulator | Resources |
-|---|---|---|
-| Vera AWS | 89 EC2 resource types |
-| Vera GCP | 91 Compute resource types |
+| Emulator | Resources Types|
+|---|---|
+| Vera AWS | 89 EC2 resources|
+| Vera GCP | 91 Compute resources|
 
-Full resource lists are in each emulator's README.
+Full resource lists are in each emulator's README or [Vera website](https://project-vera.github.io/).
