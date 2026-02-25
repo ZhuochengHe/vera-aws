@@ -7,9 +7,12 @@ We are on a mission to build high-fidelity local emulators for cloud, and have s
 
 Check out the [Vera website](https://project-vera.github.io/) for more information.
 
----
 
 ## What is Vera?
+
+<p align="center">
+  <img src="assets/workflow.png" alt="Workflow" width="90%">
+</p>
 
 Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, and teardown is never instant.
 
@@ -73,6 +76,12 @@ uv run main.py
 
 From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their real counterparts. See the individual READMEs for usage examples, test suites, and the full list of supported resources.
 
+## Test your commands with Vera
+
+```bash
+awscli ec2 create-vpc --cidr-block 10.0.0.0/16
+```
+
 
 ## Supported Resources (More resources coming soon!)
 
@@ -81,4 +90,4 @@ From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their rea
 | Vera AWS | 89 EC2 resources|
 | Vera GCP | 91 Compute resources|
 
-Full resource lists are in each emulator's README or [Vera website](https://project-vera.github.io/).
+Full resource lists are in each emulator's README and on the [Vera website](https://project-vera.github.io/).
