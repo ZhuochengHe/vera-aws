@@ -66,20 +66,41 @@ Each emulator lives in its own directory under `emulators/`. Setup is a single c
 # AWS
 cd emulators/aws-ec2
 ./install.sh
-uv run main.py  
 
 # GCP
 cd emulators/google-compute
 ./install.sh
-uv run main.py  
 ```
 
 From there, use `awscli`, `terlocal`, or `gcpcli` exactly as you would their real counterparts. See the individual READMEs for usage examples, test suites, and the full list of supported resources.
 
-## Test your commands with Vera
+## Testing a CLI command
+
+After finishing the setup, start the emulator. 
 
 ```bash
-awscli ec2 create-vpc --cidr-block 10.0.0.0/16
+cd emulators/aws-ec2
+
+uv run main.py
+```
+
+Test your CLI commands in another terminal. 
+
+```bash
+cd emulators/aws-ec2
+
+uv run awscli ec2 create-vpc --cidr-block 10.0.0.0/16
+```
+
+A response will be generated.
+```json
+{
+    "Vpc": {
+        "OwnerId": "",
+        "InstanceTenancy": "default",
+        ...
+    }
+}
 ```
 
 
