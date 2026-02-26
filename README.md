@@ -7,6 +7,8 @@ We are on a mission to build high-fidelity local emulators for cloud, and have s
 
 Check out the [Vera website](https://project-vera.github.io/) for more information.
 
+Feel free to create issues for feature requests or bug reports!
+
 
 ## What is Vera?
 
