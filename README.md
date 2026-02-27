@@ -3,7 +3,7 @@
   <img src="assets/vera-cloud.png" alt="Vera" width="50%">
 </p>
 
-We are on a mission to build high-fidelity cloud emulators that can run on your laptop: AWS, GCP, and more to come. With Vera, you can build and test infrastructure on your machine locally: no cloud accounts needed, zero cost, and risk free. 
+A high-fidelity cloud emulator that can run on your laptop: AWS, GCP, and more. With Vera, you can build and test infrastructure on your machine locally: no cloud accounts needed, zero cost, and risk free. 
 
 
 ## What is Vera?
