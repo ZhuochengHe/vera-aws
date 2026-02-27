@@ -3,7 +3,7 @@
   <img src="assets/vera-cloud.png" alt="Vera" width="50%">
 </p>
 
-We are on a mission to build high-fidelity cloud emulators that can run on your laptop: AWS, GCP, and more to come! Vera enables anyone to build and test infrastructure on your machine locally: no cloud accounts needed, zero cost, and risk free. 
+We are on a mission to build high-fidelity cloud emulators that can run on your laptop: AWS, GCP, and more to come. With Vera, you can build and test infrastructure on your machine locally: no cloud accounts needed, zero cost, and risk free. 
 
 
 ## What is Vera?
@@ -12,9 +12,9 @@ We are on a mission to build high-fidelity cloud emulators that can run on your 
   <img src="assets/workflow.png" alt="Workflow" width="90%">
 </p>
 
-Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, and teardown is never instant.
+Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, especially in a shared environment.
 
-Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools: CLI, Terraform, Python SDKs behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, and no cleanup required.
+Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools: CLI, Terraform, Python SDKs behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, no safety concerns, and no cleanup required.
 
 
 ## Why Vera?
