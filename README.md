@@ -6,7 +6,9 @@
 </p>
 
 💻 A **high-fidelity, multi-cloud emulator** that runs entirely on your laptop.
+
 🛠️ Build and test cloud infrastructure locally — **no cloud accounts, no billing, no risk**.
+
 ☁️ **Full API coverage**: Amazon EC2 (89 resources) and GCP Compute (91 resources).
 
 ## What is Vera?
