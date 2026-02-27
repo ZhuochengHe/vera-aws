@@ -1,4 +1,6 @@
 
+<h1 align="center">Vera: True Simulation of the Cloud</h1>
+
 <p align="center">
   <img src="assets/vera-cloud.png" alt="Vera" width="80%">
 </p>
