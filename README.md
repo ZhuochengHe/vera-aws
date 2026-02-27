@@ -6,15 +6,15 @@
 </p>
 
 <p align="center">
-💻 A **high-fidelity, multi-cloud emulator** that runs entirely on your laptop.
+💻 A <b>high-fidelity, multi-cloud emulator</b> that runs entirely on your laptop.
 </p>
 
 <p align="center">
-🛠️ Build and test cloud infrastructure locally — **no cloud accounts, no billing, no risk**.
+🛠️ Build and test cloud infrastructure locally — <b>no cloud accounts, no billing, no risk</b>.
 </p>
 
 <p align="center">
-☁️ **Full API coverage**: Amazon EC2 (89 resources) and GCP Compute (91 resources).
+☁️ <b>Full API coverage</b>: Amazon EC2 (89 resources) and GCP Compute (91 resources).
 </p>
 
 ## What is Vera?
