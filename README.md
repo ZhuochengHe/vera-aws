@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="assets/icon.png" alt="Vera" width="50%">
+  <img src="assets/vera-cloud.png" alt="Vera" width="50%">
 </p>
 
 We are on a mission to build high-fidelity cloud emulators that can run on your laptop: AWS, GCP, and more to come! Vera enables anyone to build and test infrastructure on your machine locally: no cloud accounts needed, zero cost, and risk free. 
