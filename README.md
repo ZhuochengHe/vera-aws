@@ -1,5 +1,5 @@
 
-<h1 align="center">Vera: True Simulation of Your Cloud</h1>
+<h1 align="center">Vera: True Simulation of Any Cloud</h1>
 
 <p align="center">
   <img src="assets/vera-cloud.png" alt="Vera" width="80%">
