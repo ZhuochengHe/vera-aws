@@ -17,6 +17,10 @@
 ☁️ <b>Full API coverage</b>: Amazon EC2 (89 resources) and GCP Compute (91 resources).
 </p>
 
+<h2 align="center">The world's first anycloud emulator</h2>
+
+
+
 ## What is Vera?
 
 <p align="center">
