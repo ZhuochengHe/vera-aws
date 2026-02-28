@@ -21,32 +21,32 @@
 
 
 
-## What is Vera?
-
-<p align="center">
-  <img src="assets/workflow.png" alt="Workflow" width="90%">
-</p>
+## Why Vera?
 
 Cloud infrastructure is expensive to experiment with. Even a quick test — spinning up a virtual machine, creating a network, attaching a disk — means provisioning real resources, waiting on remote APIs, and paying for what you use. Mistakes cost money and time, especially in a shared environment.
 
 Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services and Google Cloud Platform locally, so your tools: CLI, Terraform, Python SDKs behave exactly as they would against the real thing, except everything happens on your machine in milliseconds, with no credentials, no cost, no safety concerns, and no cleanup required.
 
 
-## Why Vera?
-
-<p align="center">
-  <img src="assets/why-vera2.png" alt="Why Vera" width="80%">
-</p>
-
-**No account needed.** Vera ships with fake credentials built in. You never authenticate against a real cloud provider, which means there's nothing to sign up for, nothing to configure, and no risk of accidentally hitting production.
+**No account needed.** Vera ships a local DevOps environment. You never authenticate against a real cloud provider, which means there's nothing to sign up for, nothing to configure, and no risk of accidentally hitting production.
 
 **Fast feedback.** Because requests never leave your machine, operations that would take seconds or minutes against a real cloud complete instantly. Iterating on infrastructure code becomes as fast as iterating on any other code.
 
 **Works with your existing tools.** Vera doesn't require you to change how you write infrastructure. Standard AWS CLI commands, standard `gcloud` commands, standard Terraform configurations — all of them work against Vera without modification.
 
-**Safe by default.** There's no way to accidentally destroy a real resource or incur a surprise bill. Every resource lives in memory and disappears when you stop the emulator.
+**Safe operations.** There's no way to accidentally destroy a real resource or incur a surprise bill. Every resource lives in memory and disappears when you stop the emulator.
 
-**Broad coverage.** Vera covers 89 AWS EC2 resource types and 91 GCP Compute resource types — VPCs, instances, disks, firewalls, load balancers, routing, snapshots, and much more. It handles the full lifecycle of the resources developers actually use day to day.
+**Full API coverage.** Vera covers 89 AWS EC2 resource types and 91 GCP Compute resource types — VPCs, instances, disks, firewalls, load balancers, routing, snapshots, and much more. It handles the full lifecycle of the resources developers actually use day to day.
+
+**Anycloud.** Vera's key innovation is a program synthesis pipeline using neurosymbolic AI that works for any cloud. Perfect fit for modern, multi-cloud deployments.
+
+
+## Vera Architecture
+
+<p align="center">
+  <img src="assets/vera-workflow.png" alt="Workflow" width="80%">
+</p>
+
 
 
 ## The Emulators
