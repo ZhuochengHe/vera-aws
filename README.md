@@ -115,13 +115,3 @@ A response will be generated.
     }
 }
 ```
-
-
-## Supported Resources (More resources coming soon!)
-
-| Emulator | Resources Types|
-|---|---|
-| Vera AWS | 89 EC2 resources|
-| Vera GCP | 91 Compute resources|
-
-Full resource lists are in each emulator's README and on the [Vera website](https://project-vera.github.io/).
