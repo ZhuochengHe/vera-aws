@@ -48,29 +48,6 @@ Vera runs the cloud on your laptop. It mimics the APIs of Amazon Web Services an
 </p>
 
 
-
-## The Emulators
-
-### Vera AWS
-
-Emulates the Amazon EC2 API with support for 89 resource types. Drop-in wrappers for the AWS CLI (`awscli`) and Terraform (`terlocal`) are included, so you can run your existing commands and configurations unchanged.
-
-In head-to-head testing against 260 real AWS CLI commands, Vera AWS passes **80%** — compared to **47%** for LocalStack.
-
-→ [Vera AWS documentation](emulators/aws-ec2/README.md)
-
----
-
-### Vera GCP
-
-Emulates the Google Cloud Compute API with support for 91 resource types. A drop-in wrapper for the gcloud CLI (`gcpcli`) handles credential isolation automatically, so `gcloud compute` commands route to the local emulator with no real Google account required. The Google Cloud Compute Python SDK is also supported.
-
-Seeded resources (a default network, common zones, machine types, and image families) are available immediately on startup with no setup needed.
-
-→ [Vera GCP documentation](emulators/google-compute/README.md)
-
----
-
 ## Quick Start
 
 Each emulator lives in its own directory under `emulators/`. Setup is a single command:
@@ -115,3 +92,27 @@ A response will be generated.
     }
 }
 ```
+
+
+## Vera Emulators
+
+### Vera-AWS
+
+Emulates the Amazon EC2 API with support for 89 resource types. Drop-in wrappers for the AWS CLI (`awscli`) and Terraform (`terlocal`) are included, so you can run your existing commands and configurations unchanged.
+
+In head-to-head testing against 260 real AWS CLI commands, Vera AWS passes **80%** — compared to **47%** for LocalStack.
+
+→ [Vera AWS documentation](emulators/aws-ec2/README.md)
+
+---
+
+### Vera-GCP
+
+Emulates the Google Cloud Compute API with support for 91 resource types. A drop-in wrapper for the gcloud CLI (`gcpcli`) handles credential isolation automatically, so `gcloud compute` commands route to the local emulator with no real Google account required. The Google Cloud Compute Python SDK is also supported.
+
+Seeded resources (a default network, common zones, machine types, and image families) are available immediately on startup with no setup needed.
+
+→ [Vera GCP documentation](emulators/google-compute/README.md)
+
+---
+
